@@ -243,11 +243,15 @@ describe('tui modules', () => {
       noMatch: (text) => text,
     })
     const prompt = new InlineSelectPrompt('Question: What should I do?', choices)
+    const timeline = new TurnTimeline()
+    timeline.addEntry(prompt)
+    expect(timeline.isTranscriptRenderStable()).toBe(false)
 
     expect(prompt.render(80).join('\n')).toContain('Question: What should I do?')
     expect(prompt.render(80).join('\n')).toContain('Allow')
 
     prompt.complete('selected answer')
+    expect(timeline.isTranscriptRenderStable()).toBe(true)
     expect(prompt.render(80).join('\n')).toContain('selected answer')
     prompt.complete('answer')
     expect(prompt.render(80).join('\n')).toContain('answer')
@@ -336,7 +340,7 @@ describe('tui modules', () => {
   test('preview click coordinates include preceding transcript rows', () => {
     let expanded = false
     const toolRow = {
-      render: () => ['tool [Expand preview]'],
+      render: () => [expanded ? 'tool [Collapse preview]' : 'tool [Expand preview]'],
       getInteractionTargets: () => [{
         action: 'toggle-preview' as const,
         rowOffset: 0,
@@ -365,6 +369,7 @@ describe('tui modules', () => {
     expect(buttonRow).toBeGreaterThan(0)
     expect(layout.handleInput(`\x1b[<0;10;${buttonRow}M`)).toBe(true)
     expect(expanded).toBe(true)
+    expect(layout.render(80).join('\n')).toContain('[Collapse preview]')
   })
 
   test('startup resume renders restored messages immediately like session switching', () => {
@@ -686,6 +691,56 @@ describe('tui modules', () => {
     expect(rendered).toContain('Running tools…')
     expect(rendered).not.toContain('Thinking…')
     expect(timeline.render(80)).toHaveLength(1)
+  })
+
+  test('chat transcript reuses stable history and invalidates it after updates', () => {
+    let renderCount = 0
+    let content = 'first'
+    const timeline = new TurnTimeline()
+    timeline.addEntry({ render: () => { renderCount++; return [content] } })
+    const transcript = new ChatTranscript()
+    transcript.addChild(timeline)
+
+    expect(transcript.render(80)).toEqual(['first'])
+    expect(transcript.render(80)).toEqual(['first'])
+    expect(renderCount).toBe(1)
+
+    content = 'updated'
+    transcript.invalidateRenderedContent()
+    expect(transcript.render(80)).toEqual(['updated'])
+    expect(renderCount).toBe(2)
+
+    timeline.addEntry({ render: () => ['new entry'] })
+    expect(transcript.render(80)).toEqual(['updated', 'new entry'])
+    expect(renderCount).toBe(3)
+  })
+
+  test('chat transcript caches completed dynamic entries but keeps active entries live', () => {
+    let renderCount = 0
+    let content = 'running'
+    let stable = false
+    let stabilityCheckCount = 0
+    let invalidate: (() => void) | undefined
+    const component = {
+      render: () => { renderCount++; return [content] },
+      setRenderInvalidationListener: (listener?: () => void) => { invalidate = listener },
+      isTranscriptRenderStable: () => { stabilityCheckCount++; return stable },
+    } as unknown as Component
+    const transcript = new ChatTranscript()
+    transcript.addChild(component)
+
+    expect(transcript.render(80)).toEqual(['running'])
+    expect(transcript.render(80)).toEqual(['running'])
+    expect(renderCount).toBe(2)
+    expect(stabilityCheckCount).toBe(1)
+
+    content = 'finished'
+    stable = true
+    invalidate?.()
+    expect(transcript.render(80)).toEqual(['finished'])
+    expect(transcript.render(80)).toEqual(['finished'])
+    expect(renderCount).toBe(3)
+    expect(stabilityCheckCount).toBe(2)
   })
 
   test('concise activity and elapsed time remain visible while tool cards are active', () => {

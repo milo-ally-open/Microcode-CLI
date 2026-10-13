@@ -12,6 +12,7 @@ export class BashExecutionComponent extends Container {
   private exitCode?: number
   private cancelled = false
   private completed = false
+  private onRenderInvalidated?: () => void
 
   constructor(command: string, ui: TUI, excludeFromContext = false) {
     super()
@@ -60,6 +61,14 @@ export class BashExecutionComponent extends Container {
     this.updateDisplay()
   }
 
+  setRenderInvalidationListener(listener?: () => void): void {
+    this.onRenderInvalidated = listener
+  }
+
+  isTranscriptRenderStable(): boolean {
+    return this.completed
+  }
+
   setComplete(exitCode: number | undefined, cancelled: boolean): void {
     this.exitCode = exitCode
     this.cancelled = cancelled
@@ -90,5 +99,6 @@ export class BashExecutionComponent extends Container {
         this.contentContainer.addChild(new Text(line, 1, 0))
       }
     }
+    this.onRenderInvalidated?.()
   }
 }

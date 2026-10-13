@@ -1473,6 +1473,7 @@ export class App {
       }
       const updateInput = () => {
         inputLine.setText(`> ${secret ? '*'.repeat([...value].length) : value}`)
+        this.invalidateChatRender()
         this.ui.requestRender()
       }
       const appendText = (text: string) => {
@@ -3116,6 +3117,7 @@ export class App {
       const message = value.trim()
       if (!message) {
         prompt.setText('Commit message cannot be empty · Enter to commit · Esc to cancel')
+        this.invalidateChatRender()
         this.ui.requestRender()
         return
       }
@@ -3750,6 +3752,7 @@ export class App {
         details: { phase: 'approval', previewNotice: `Preview unavailable: ${error instanceof Error ? error.message : 'unknown error'}` },
       })
     }
+    this.invalidateChatRender()
     this.ui.requestRender()
   }
 
@@ -3767,7 +3770,10 @@ export class App {
     const pendingComponent = matchingCall
       ? this.pendingTools.get(matchingCall[0]) ?? this.toolRows.get(matchingCall[0])
       : undefined
-    if (pendingComponent) dispatchToolLifecycle(pendingComponent, { phase: 'awaiting-approval' })
+    if (pendingComponent) {
+      dispatchToolLifecycle(pendingComponent, { phase: 'awaiting-approval' })
+      this.invalidateChatRender()
+    }
     await this.prepareApprovalPresentation(toolName, input)
 
     return new Promise<boolean>((resolve) => {
@@ -4021,6 +4027,10 @@ export class App {
     }
   }
 
+  private invalidateChatRender(): void {
+    this.chatContainer?.invalidateRenderedContent?.()
+  }
+
   private createToolRow(toolCallId: string, toolName: string, args: any): ToolUIComponent {
     const UIConstructor = getToolUIConstructor(toolName)
     const component: ToolUIComponent = UIConstructor
@@ -4064,6 +4074,7 @@ export class App {
             this.appendTurnEntry(this.streamingComponent, 'assistant')
             this.setAgentActivity({ type: 'thinking' })
             this.streamingComponent.updateContent(this.streamingMessage)
+            this.invalidateChatRender()
             this.ui.requestRender()
           }
           break
@@ -4072,6 +4083,7 @@ export class App {
           if (this.streamingComponent && event.message.role === 'assistant') {
             this.streamingMessage = event.message
             this.streamingComponent.updateContent(this.streamingMessage)
+            this.invalidateChatRender()
             if (
               event.assistantMessageEvent.type === 'text_delta' &&
               this.activityState.phase !== 'responding'
@@ -4096,6 +4108,7 @@ export class App {
           if (event.message.role === 'assistant') {
             if (this.streamingComponent && this.streamingMessage) {
               this.streamingComponent.updateContent(this.streamingMessage)
+              this.invalidateChatRender()
               this.streamingComponent = undefined
               this.streamingMessage = undefined
             }
@@ -4156,6 +4169,7 @@ export class App {
           this.streamingToolLastRenderAt.delete(event.toolCallId)
           this.stopToolElapsedTimerIfIdle()
           this.setAgentActivity({ type: 'tool-finished', pendingTools: this.pendingTools.size })
+          this.invalidateChatRender()
           this.ui.requestRender()
           break
         }
@@ -4312,6 +4326,7 @@ export class App {
   }
 
   private commitToolFrame(): void {
+    this.invalidateChatRender()
     const immediateUi = this.ui as unknown as {
       stopped?: boolean
       renderRequested?: boolean
@@ -4370,6 +4385,7 @@ export class App {
       }
 
       if (updated) {
+        this.invalidateChatRender()
         this.ui.requestRender()
       }
     }, 100)
@@ -4391,6 +4407,7 @@ export class App {
     for (const component of this.pendingTools.values()) {
       component.updateElapsed?.(0)
     }
+    this.invalidateChatRender()
     this.ui.requestRender()
   }
 
@@ -4401,6 +4418,7 @@ export class App {
       component.updateElapsed(0)
       this.pendingToolStartedAt.set(toolCallId, startedAt)
     }
+    this.invalidateChatRender()
     if (this.pendingToolStartedAt.size > 0) {
       this.startToolElapsedTimer()
     }

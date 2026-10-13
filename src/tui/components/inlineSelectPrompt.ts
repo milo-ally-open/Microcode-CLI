@@ -5,6 +5,7 @@ export class InlineSelectPrompt extends Container {
   focused = false
   private choicesVisible = true
   private result?: Text
+  private onRenderInvalidated?: () => void
 
   constructor(
     title: string,
@@ -19,6 +20,14 @@ export class InlineSelectPrompt extends Container {
     if (this.choicesVisible) this.choices.handleInput(data)
   }
 
+  isTranscriptRenderStable(): boolean {
+    return !this.choicesVisible
+  }
+
+  setRenderInvalidationListener(listener?: () => void): void {
+    this.onRenderInvalidated = listener
+  }
+
   complete(result: string): void {
     if (this.choicesVisible) {
       this.removeChild(this.choices)
@@ -27,5 +36,6 @@ export class InlineSelectPrompt extends Container {
     if (this.result) this.removeChild(this.result)
     this.result = new Text(result, 1, 0)
     this.addChild(this.result)
+    this.onRenderInvalidated?.()
   }
 }

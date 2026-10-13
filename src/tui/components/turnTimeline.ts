@@ -1,4 +1,4 @@
-import { Container, Text, type Component } from '@earendil-works/pi-tui'
+import { Container, Spacer, Text, type Component } from '@earendil-works/pi-tui'
 import chalk from 'chalk'
 import type { ToolInteractionTarget, ToolUIComponent } from '../../tools/registry.ts'
 
@@ -9,12 +9,46 @@ interface TimelineEntry {
   kind: EntryKind
 }
 
+type TranscriptCacheAwareComponent = Component & {
+  isTranscriptRenderStable?: () => boolean
+  setRenderInvalidationListener?: (listener?: () => void) => void
+}
+
+function setRenderInvalidationListener(component: Component, listener?: () => void): void {
+  (component as TranscriptCacheAwareComponent).setRenderInvalidationListener?.(listener)
+}
+
 /** Renders one user turn as a connected vertical activity rail. */
 export class TurnTimeline extends Container {
   private entries: TimelineEntry[] = []
   private activity?: Text
   private renderedWidth?: number
   private renderedToolTargets: ToolInteractionTarget[] = []
+  private unstableEntries = new Set<Component>()
+  private onInvalidate?: () => void
+
+  setRenderInvalidationListener(listener?: () => void): void {
+    this.onInvalidate = listener
+  }
+
+  private notifyInvalidated(): void {
+    this.renderedWidth = undefined
+    this.renderedToolTargets = []
+    this.onInvalidate?.()
+  }
+
+  private observeEntry(component: Component): void {
+    const cacheAware = component as TranscriptCacheAwareComponent
+    const updateStability = () => {
+      if (cacheAware.isTranscriptRenderStable?.() === false) this.unstableEntries.add(component)
+      else this.unstableEntries.delete(component)
+      this.notifyInvalidated()
+    }
+    if (cacheAware.isTranscriptRenderStable?.() === false) this.unstableEntries.add(component)
+    if (cacheAware.setRenderInvalidationListener) {
+      cacheAware.setRenderInvalidationListener(updateStability)
+    }
+  }
 
   addEntry(component: Component, kind: EntryKind = 'status'): void {
     // Streaming tool updates can revisit the same component. A timeline owns a
@@ -22,7 +56,9 @@ export class TurnTimeline extends Container {
     if (this.entries.some((entry) => entry.component === component)) return
     if (this.activity) this.entries.pop()
     this.entries.push({ component, kind })
+    this.observeEntry(component)
     if (this.activity) this.entries.push({ component: this.activity, kind: 'status' })
+    this.notifyInvalidated()
   }
 
   setActivity(label?: string): void {
@@ -30,20 +66,27 @@ export class TurnTimeline extends Container {
       if (!this.activity) return
       this.entries = this.entries.filter((entry) => entry.component !== this.activity)
       this.activity = undefined
+      this.notifyInvalidated()
       return
     }
 
     if (!this.activity) {
       this.activity = new Text(label, 0, 0)
       this.entries.push({ component: this.activity, kind: 'status' })
+      this.notifyInvalidated()
       return
     }
 
     this.activity.setText(label)
+    this.notifyInvalidated()
   }
 
   getToolInteractionTargets(width: number): ToolInteractionTarget[] {
     return width === this.renderedWidth ? this.renderedToolTargets : []
+  }
+
+  isTranscriptRenderStable(): boolean {
+    return this.unstableEntries.size === 0
   }
 
   render(width: number): string[] {
@@ -93,6 +136,7 @@ export class TurnTimeline extends Container {
 
   invalidate(): void {
     for (const { component } of this.entries) component.invalidate?.()
+    this.notifyInvalidated()
   }
 }
 
@@ -100,12 +144,69 @@ export class TurnTimeline extends Container {
 export class ChatTranscript extends Container {
   private renderedWidth?: number
   private renderedToolTargets: ToolInteractionTarget[] = []
+  private renderedLines?: string[]
+  private nonCacheableChildren = new Set<Component>()
+
+  private isCacheableComponent(component: Component): boolean {
+    if (component instanceof Text || component instanceof Spacer) return true
+    const cacheAware = component as TranscriptCacheAwareComponent
+    return cacheAware.isTranscriptRenderStable?.() === true
+  }
+
+  private updateChildStability(component: Component): void {
+    if (this.isCacheableComponent(component)) this.nonCacheableChildren.delete(component)
+    else this.nonCacheableChildren.add(component)
+  }
+
+  addChild(component: Component): void {
+    super.addChild(component)
+    setRenderInvalidationListener(component, () => {
+      this.updateChildStability(component)
+      this.invalidateRenderedContent()
+    })
+    this.updateChildStability(component)
+    this.invalidateRenderedContent()
+  }
+
+  removeChild(component: Component): void {
+    const wasPresent = this.children.includes(component)
+    if (wasPresent) {
+      setRenderInvalidationListener(component, undefined)
+      this.nonCacheableChildren.delete(component)
+    }
+    super.removeChild(component)
+    if (wasPresent) this.invalidateRenderedContent()
+  }
+
+  clear(): void {
+    for (const component of this.children) {
+      setRenderInvalidationListener(component, undefined)
+    }
+    super.clear()
+    this.nonCacheableChildren.clear()
+    this.invalidateRenderedContent()
+  }
+
+  /** Clear only the flattened transcript cache after a nested component changes. */
+  invalidateRenderedContent(): void {
+    this.renderedWidth = undefined
+    this.renderedToolTargets = []
+    this.renderedLines = undefined
+  }
+
+  invalidate(): void {
+    super.invalidate()
+    this.invalidateRenderedContent()
+  }
 
   getToolInteractionTargets(width: number): ToolInteractionTarget[] {
     return width === this.renderedWidth ? this.renderedToolTargets : []
   }
 
   render(width: number): string[] {
+    const cacheable = this.nonCacheableChildren.size === 0
+    if (cacheable && this.renderedLines && this.renderedWidth === width) return this.renderedLines
+
     this.renderedWidth = width
     this.renderedToolTargets = []
     const lines: string[] = []
@@ -123,6 +224,7 @@ export class ChatTranscript extends Container {
       lines.push(...componentLines)
     }
 
+    this.renderedLines = cacheable ? lines : undefined
     return lines
   }
 }

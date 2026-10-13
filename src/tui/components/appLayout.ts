@@ -92,6 +92,7 @@ export class AppLayout implements Component {
         }
 
         toggle.activate()
+        this.chat.invalidate?.()
         this.lastTogglePress = pressed ? { row, at: Date.now() } : undefined
         return true
       }
