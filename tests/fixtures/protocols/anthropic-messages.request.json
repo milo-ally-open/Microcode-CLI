@@ -1,0 +1,7 @@
+{
+  "model": "openai-codex/gpt-5-codex",
+  "system": "Be concise.",
+  "messages": [{ "role": "user", "content": "Say hello." }],
+  "stream": true,
+  "max_tokens": 32
+}

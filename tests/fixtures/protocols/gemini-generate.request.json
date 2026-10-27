@@ -1,0 +1,9 @@
+{
+  "model_id": "deepseek/deepseek-v4-pro",
+  "stream": true,
+  "body": {
+    "systemInstruction": { "parts": [{ "text": "Be concise." }] },
+    "contents": [{ "role": "user", "parts": [{ "text": "Say hello." }] }],
+    "generationConfig": { "maxOutputTokens": 32 }
+  }
+}

@@ -104,6 +104,13 @@ describe('runtime Agent session host', () => {
       const snapshot = await client.getSnapshot<any>(runtime.session.sessionId)
       expect(snapshot.messages.some((message: any) => message.role === 'user' && JSON.stringify(message).includes('hello runtime'))).toBe(true)
       expect(snapshot.messages.some((message: any) => message.role === 'assistant' && JSON.stringify(message).includes('runtime response'))).toBe(true)
+      const assistantMessage = snapshot.messages.find((message: any) => message.role === 'assistant' && JSON.stringify(message).includes('runtime response'))
+      expect(assistantMessage).toHaveProperty('model.provider_id', 'deepseek')
+      expect(assistantMessage).toHaveProperty('model.model_id', 'deepseek-v4-pro')
+      expect(assistantMessage).not.toHaveProperty('api')
+      expect(assistantMessage).not.toHaveProperty('provider')
+      expect(assistantMessage).not.toHaveProperty('model_id')
+      expect(JSON.stringify(snapshot)).not.toContain('@earendil-works/pi-agent-core')
     } finally {
       controller.abort()
       await events?.return(undefined as never).catch(() => undefined)

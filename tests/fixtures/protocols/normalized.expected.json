@@ -1,0 +1,38 @@
+{
+  "openai-chat": {
+    "modelId": "deepseek/deepseek-v4-pro",
+    "stream": true,
+    "maxTokens": 32,
+    "messages": [
+      { "role": "system", "text": "Be concise." },
+      { "role": "user", "text": "Say hello." }
+    ]
+  },
+  "openai-responses": {
+    "modelId": "openai-codex/gpt-5-codex",
+    "stream": true,
+    "maxTokens": 32,
+    "messages": [
+      { "role": "system", "text": "Be concise." },
+      { "role": "user", "text": "Say hello." }
+    ]
+  },
+  "gemini-generate": {
+    "modelId": "deepseek/deepseek-v4-pro",
+    "stream": true,
+    "maxTokens": 32,
+    "messages": [
+      { "role": "system", "text": "Be concise." },
+      { "role": "user", "text": "Say hello." }
+    ]
+  },
+  "anthropic-messages": {
+    "modelId": "openai-codex/gpt-5-codex",
+    "stream": true,
+    "maxTokens": 32,
+    "messages": [
+      { "role": "system", "text": "Be concise." },
+      { "role": "user", "text": "Say hello." }
+    ]
+  }
+}

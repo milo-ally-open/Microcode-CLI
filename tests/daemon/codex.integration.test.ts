@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,10 +13,11 @@ const enabled = process.env.MICROCODE_CODEX_INTEGRATION === '1'
 if (enabled) setDefaultTimeout(60_000)
 const DUMMY_GATEWAY_TOKEN = 'local-codex-smoke-token'
 const expectedText = 'Codex reached the Microcode Model Gateway.'
-// Keep the Codex CLI on its regular Responses request path. The fake runtime does not call the
-// provider; Responses API metadata lets the gateway validate Codex's opt-in summary field.
-const catalogModel = getAllModels().find((item) => item.provider === 'deepseek' && item.id === 'deepseek-v4-pro')!
-const model = { ...catalogModel, api: 'openai-responses' } as Model<any>
+const expectedCodexVersion = readFileSync(new URL('../fixtures/clients/codex-cli.version.txt', import.meta.url), 'utf8').trim()
+// Codex CLI 0.164 emits a hosted `custom` tool in its Responses request. The gateway deliberately
+// rejects hosted tools before provider inference; this smoke verifies that boundary end to end.
+const catalogModel = getAllModels().find((item) => item.provider === 'openai-codex' && item.id === 'gpt-5.5')!
+const model = catalogModel as Model<any>
 
 let testHome: string | undefined
 let codexHomePath: string | undefined
@@ -162,29 +164,25 @@ describe('installed Codex CLI gateway smoke', () => {
     return
   }
 
-  test('sends a Responses streaming text turn through the gateway with configured auth', async () => {
-    const { result, calls, resolvedModels } = await runGatewaySmoke()
-
-    if (result.code !== 0) {
-      throw new Error(`Codex CLI exited ${result.code}. Resolved models=${resolvedModels.join(',')}; calls=${calls.length}; events=${observedEvents.join(',')}. stdout: ${result.stdout.slice(-1500)} stderr: ${result.stderr.slice(-1500)}`)
-    }
-    expect(result.code).toBe(0)
-    expect(result.stdout).toContain(expectedText)
-    expect(result.stdout + result.stderr).not.toContain(DUMMY_GATEWAY_TOKEN)
-    expect(calls.length).toBeGreaterThan(0)
-    expect(calls.some((call) => call.context.messages.some((message) => message.role === 'user'))).toBe(true)
-    expect(calls.some((call) => call.options.toolChoice === 'auto')).toBe(true)
+  test('runs the pinned Codex CLI version recorded by the smoke fixture', () => {
+    const executable = process.env.MICROCODE_CODEX_BIN || 'codex'
+    const version = spawnSync(executable, ['--version'], {
+      encoding: 'utf8',
+      env: { ...process.env, CODEX_DISABLE_UPDATE_CHECK: '1' },
+    })
+    if (version.error) throw version.error
+    expect(version.status).toBe(0)
+    expect(version.stdout.trim()).toBe(expectedCodexVersion)
   })
 
-  test('completes a client-owned function tool round trip through Codex', async () => {
-    const { result, calls, observedEvents, resolvedModels } = await runGatewaySmoke(true)
-    if (result.code !== 0) {
-      throw new Error(`Codex CLI exited ${result.code}. Resolved models=${resolvedModels.join(',')}; calls=${calls.length}; events=${observedEvents.join(',')}. stdout: ${result.stdout.slice(-1500)} stderr: ${result.stderr.slice(-1500)}`)
-    }
-    expect(result.stdout).toContain('MICROCODE_CODEX_TOOL_ROUNDTRIP')
-    expect(result.stdout).toContain(expectedText)
+  test('reaches the gateway and safely rejects Codex hosted tools', async () => {
+    const { result, calls, resolvedModels } = await runGatewaySmoke()
+
+    expect(result.code).not.toBe(0)
+    expect(result.stdout).toContain('Unsupported Responses tool type')
+    expect(result.stdout).toContain('custom')
     expect(result.stdout + result.stderr).not.toContain(DUMMY_GATEWAY_TOKEN)
-    expect(observedEvents).toContain('toolcall_start')
-    expect(calls.some((call) => call.context.messages.some((message) => message.role === 'toolResult' && JSON.stringify(message).includes('MICROCODE_CODEX_TOOL_ROUNDTRIP')))).toBe(true)
+    expect(resolvedModels).toHaveLength(0)
+    expect(calls).toHaveLength(0)
   })
 })

@@ -115,9 +115,18 @@
 | 2026-10-27 | 将 MicrocodeAgent 改为泛型消息/模型运行时，通过 AgentRuntimeAdapter 注入内核构造、模型解析与推理、compaction message adapter、标题生成和系统提示消息操作；Pi 默认 composition 移出核心类 | `src/agent/MicrocodeAgent.ts` 与 `types.ts` 对 Pi/package/model resolver import scan 无命中；非 Pi model/message adapter contract 用例 1 pass；Agent tests 15 pass；类型检查通过 | `src/agent/contracts.ts`、`src/agent/MicrocodeAgent.ts`、`src/agent/piRuntimeAdapter.ts`、`src/kernel/pi/agent.ts`、`tests/agent/runtimeAdapter.test.ts` |
 | 2026-10-27 | 旧 custom-model 配置诊断包含 disabled 的 `custom/model-id`，并限制展示数量，不输出 base URL、auth 环境变量名或 header 值 | `bun test ./tests/models/config.test.ts` 覆盖安全字段；最近完整测试与类型检查通过 | `src/models/custom.ts`、`tests/models/config.test.ts`、`docs/specs/runtime-architecture/tasks.md` |
 | 2026-10-27 | TUI permission mode UI 与 runtime facade 改为直接依赖纯 permission contract，避免 `App` 通过 barrel export 加载 PermissionManager 和工具 registry | 新增静态 import-boundary test；最近完整测试与类型检查通过 | `src/tui/app.ts`、`src/tui/agentPort.ts`、`src/tui/runtimeAgentFacade.ts`、`tests/tui/import-boundaries.test.ts` |
+
+## 已完成的阶段验收（2026-10-27）
+
+- [x] **历史 session 兼容** — `tests/fixtures/sessions/legacy-v3-session.jsonl` 通过锁定 Pi JSONL repo 与 `SessionManager` 打开；验证 user/assistant 消息、完整 archive 与源文件不被重写。`tests/session/session.test.ts`。
+- [x] **Provider auth/stream 与协议/client fixtures** — `tests/models/providerRuntime.test.ts` 验证 API-key secret prompt/status/logout 不泄密，以及锁定 Pi DeepSeek adapter 对本地 OpenAI Chat Completions SSE 服务发起认证流式请求；`tests/daemon/protocol-fixtures.test.ts` 用固定 JSON fixture 覆盖 Chat Completions、Responses、Gemini Generate Content、Anthropic Messages。固定 Codex CLI 版本见 `tests/fixtures/clients/codex-cli.version.txt`；启用 `MICROCODE_CODEX_INTEGRATION=1` 的实际 CLI smoke 验证请求抵达 Gateway 且凭据不回显。当前 CLI 会发送 Responses hosted `custom` tool，Gateway 按设计在 provider inference 前安全拒绝；不将其描述为已支持 hosted-tool 执行。
+- [x] **Bun runtime Windows 子进程** — `tests/daemon/runtime-service-process.test.ts` 启动真实 child、握手认证、发出并取消 secret auth prompt、重连/replay、关闭后重启并再次认证，确认 shutdown 清除 metadata。
+- [x] **跨进程变更竞争与 capability secret 脱敏** — 同一子进程测试并发提交两个相同 `expected_version` 的工具变更，验证一个提交、另一个收到 `stale_tool_snapshot`；MCP Authorization secret 不出现在 runtime snapshot、prompt event 或 child output。
+- [x] **Pi composition 边界** — 接受 `RuntimeAgentSession` 在 daemon composition root 内实例化 Pi adapter；`tests/daemon/runtime-composition-boundary.test.ts` 证明 Agent core 与 runtime contracts 不导入 Pi，`tests/daemon/runtime-agent-session.test.ts` 证明 wire model DTO 保持中性。此验收确认当前 Pi composition 的边界，并不声称已经替换 Pi 内核。
+
 ## 完成摘要
 
-- 已完成任务：T-01。T-02/03/04 的 adapter、allowlist 与 protocol slices 已实现；T-05 至 T-10 仍在进行。
-- 最近完整回归：`bun test ./tests` 为 249 pass、1 Codex CLI integration skip、0 fail、1332 expectations；`bunx tsc --noEmit` 与 runtime-architecture spec validator 通过。曾有一次 Git fetch/push 用例超时，但单文件重跑和随后两次全套重跑均通过。Build 未运行。剩余工作包括 RuntimeAgentSession/kernel-neutral composition 的跨进程验收、session 历史 JSONL fixture、provider auth/stream smoke、四协议固定 fixture 与版本化 client smoke、Runtime auth prompt/process acceptance。
+- 完成的规格任务：T-01。T-02 至 T-10 的更广架构交付仍按任务状态分阶段推进；本轮五项阶段验收已完成，详见上表。
+- 最近完整回归：`bun test ./tests` 为 255 pass、1 个默认跳过的 Codex CLI integration test、0 fail、1388 expectations；另以 `MICROCODE_CODEX_INTEGRATION=1 bun test ./tests/daemon/codex.integration.test.ts` 验证固定版本 Codex CLI smoke（2 pass、0 fail、8 expectations）。`bunx tsc --noEmit`、runtime-architecture spec validator 与 `git diff --check` 通过。Build 未运行。后续未完成项仍包括更广的模型/provider 和 capability 矩阵验收、完整 TUI 默认 runtime-owner 迁移及其余 AC；Codex hosted `custom` tool 目前被 Gateway 明确拒绝，不属于已支持能力。
 - 已同步的权威来源：新增重构 architecture spec group；AGENTS.md、旧模型规范及 README provider 文档已同步当前 allowlist 状态。
 - 完成日期：未完成。

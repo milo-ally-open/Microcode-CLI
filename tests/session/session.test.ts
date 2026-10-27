@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { copyFile, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { estimateMessagesTokens, estimateTokens } from '../../src/session/TokenEstimator.ts'
@@ -76,6 +76,32 @@ describe('session modules', () => {
       await manager.saveMessages([{ role: 'user', content: 'hello', timestamp: 1 } as any])
       expect(manager.getSessionId()).toBe(sessionId)
       expect(await manager.loadMessages()).toHaveLength(1)
+    } finally {
+      await manager.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('opens a checked-in historical Pi v3 JSONL session without rewriting its source', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'microcode-session-legacy-fixture-'))
+    const sessionsRoot = join(dir, 'sessions')
+    const sessionDirectory = join(sessionsRoot, 'legacy-fixture')
+    const sessionPath = join(sessionDirectory, '2025-02-03T04-05-06-000Z_legacy-fixture-session.jsonl')
+    const fixturePath = new URL('../fixtures/sessions/legacy-v3-session.jsonl', import.meta.url)
+    await mkdir(sessionDirectory, { recursive: true })
+    await copyFile(fixturePath, sessionPath)
+    const originalBytes = await readFile(sessionPath)
+    const manager = createManager({ sessionsRoot })
+
+    try {
+      const metadata = (await manager.list()).find((item) => item.id === 'legacy-fixture-session')
+      expect(metadata).toBeDefined()
+      const messages = await manager.open(metadata!)
+      expect(messages.map((message: any) => message.role)).toEqual(['user', 'assistant'])
+      expect((messages[0] as any).content).toBe('A request from the legacy transcript.')
+      expect((messages[1] as any).content[0].text).toBe('A response from the legacy transcript.')
+      expect((await manager.loadArchiveEntries()).filter((entry) => entry.type === 'message')).toHaveLength(2)
+      expect(await readFile(sessionPath)).toEqual(originalBytes)
     } finally {
       await manager.close()
       await rm(dir, { recursive: true, force: true })
