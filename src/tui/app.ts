@@ -1,6 +1,3 @@
-import type { AgentMessage, ThinkingLevel } from '@earendil-works/pi-agent-core'
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from '@earendil-works/pi-ai'
-import type { AuthEvent, AuthPrompt, AuthType } from '@earendil-works/pi-ai'
 import {
   TUI,
   ProcessTerminal,
@@ -17,8 +14,7 @@ import chalk from 'chalk'
 import { createTwoFilesPatch } from 'diff'
 import type { ChildProcessWithoutNullStreams } from 'child_process'
 import { networkInterfaces } from 'node:os'
-import { getAllModels, getModels, resolveApiKey } from '../models/index.ts'
-import { getProviderAuthChoices, type ProviderAuthChoice } from '../models/authChoices.ts'
+import type { ModelAuthEvent, ModelAuthPrompt, ModelAuthType, ModelCatalogSnapshot } from '../models/contracts.ts'
 import { theme, getEditorTheme, getMarkdownTheme, getBashModeBorderColor } from './theme.ts'
 import { MicrocodeEditor } from './components/microcodeEditor.ts'
 import { FooterComponent } from './components/footer.ts'
@@ -34,12 +30,15 @@ import {
 import { ToolExecutionComponent } from './components/toolExecution.ts'
 import { BashExecutionComponent } from './components/bashExecution.ts'
 import { parseBashInput } from './bashInput.ts'
-import { dispatchToolLifecycle, getToolDefinition, getToolUIConstructor, type ToolUIComponent } from '../tools/registry.ts'
+import {
+  dispatchToolLifecycle,
+  getToolUIConstructor,
+  projectToolInput,
+  type ToolUIComponent,
+} from './toolPresentationRegistry.ts'
 import { UserMessage } from './components/userMessage.ts'
 import { ChatTranscript, TurnTimeline } from './components/turnTimeline.ts'
 import { InlineSelectPrompt } from './components/inlineSelectPrompt.ts'
-import type { ImageContent } from '@earendil-works/pi-ai'
-import { modelSupportsImages } from '../models/index.ts'
 import {
   collectImagePathsFromText,
   stripImagePathsFromText,
@@ -49,35 +48,28 @@ import {
 } from '../utils/imageUtils.ts'
 import { readClipboardImage } from '../utils/clipboardImage.ts'
 import { resolve } from 'path'
-import type { McpClientManager } from '../mcp/client.ts'
-import type { McpServerState } from '../mcp/types.ts'
-import { discoverMcpCapabilities, type McpCapabilitiesResult } from '../mcp/capabilities.ts'
-import type { PluginManager } from '../plugins/PluginManager.ts'
-import type { PluginScope, PluginSnapshot } from '../plugins/types.ts'
-import { TOOL_NAME as BASH_TOOL_NAME } from '../tools/BashTool/BashTool.ts'
-import { TOOL_NAME as READ_TOOL_NAME } from '../tools/FileReadTool/FileReadTool.ts'
-import { TOOL_NAME as WRITE_TOOL_NAME } from '../tools/FileWriteTool/FileWriteTool.ts'
-import { TOOL_NAME as EDIT_TOOL_NAME } from '../tools/FileEditTool/FileEditTool.ts'
-import { SessionManager } from '../session/SessionManager.ts'
-import { exportSessionJsonl } from '../session/exportSession.ts'
-import { DEFAULT_PROJECT_INSTRUCTIONS_MAX_BYTES, loadProjectInstructions } from '../instructions/projectInstructions.ts'
-import { buildInitTaskPrompt, extractInitDraft, getInitProjectFileOutline } from '../instructions/initProjectGuidance.ts'
-import { readMicroFile, writeMicroFile, type MicroFileSnapshot } from '../instructions/writeMicroFile.ts'
-import type { MicrocodeAgent, MicrocodeAgentEvent } from '../agent/index.ts'
-import { type PermissionMode, PERMISSION_MODES } from '../permissions/index.ts'
-import type { TaskList } from '../tasks/TaskSystem.ts'
+import { TOOL_IDS } from '../tools/contracts.ts'
+import type { TuiAgentEvent, TuiAgentPort, TuiImageInput, TuiThinkingLevel, TuiTokenSnapshot } from './agentPort.ts'
+import type { TuiModelPort } from './modelPort.ts'
+import type { RuntimeMessage } from '../runtime/contracts.ts'
+import type { ModelDescriptor } from '../models/contracts.ts'
+import type { TuiPluginPort, TuiPluginScope, TuiPluginSnapshot } from './pluginPort.ts'
+import type { TuiSessionPort, TuiTaskList } from './sessionPort.ts'
+import type { TuiMcpPort, TuiMcpServerState, TuiMcpSnapshot } from './mcpPort.ts'
+import type { TuiInstructionsPort } from './instructionsPort.ts'
+import { PERMISSION_MODES, type PermissionMode } from '../permissions/types.ts'
+import type { TuiGitPort, TuiGitRepository, TuiGitFileChange, TuiGitStatus } from './gitPort.ts'
+
 import { MultiSelectList, type MultiSelectItem } from './components/multiSelectList.ts'
-import { applyWorkspaceFileCompletion, buildWorkspaceFileContext, filterWorkspaceFiles, formatFileMention, getMentionedImagePaths, listWorkspaceFiles } from './workspaceFiles.ts'
-import { applySkillCompletion, buildSkillMentionContext, filterInvocableSkills, highlightSkillMatch, stripInjectedSkillContextForDisplay } from './skillMentions.ts'
-import { applyPluginCompletion, buildPluginMentionContext, filterMentionablePlugins, highlightPluginMatch, isPluginAutocompleteContext } from './pluginMentions.ts'
+import { applyWorkspaceFileCompletion, filterWorkspaceFiles, formatFileMention, getMentionedImagePaths, listWorkspaceFiles } from './workspaceFiles.ts'
+import { applySkillCompletion, filterInvocableSkills, highlightSkillMatch, stripInjectedSkillContextForDisplay } from './skillMentions.ts'
+import { applyPluginCompletion, filterMentionablePlugins, highlightPluginMatch, isPluginAutocompleteContext } from './pluginMentions.ts'
 import { createSessionTitle, normalizeSessionTitle } from './sessionTitle.ts'
 import {
   canRunGitCommand,
-  GitRepository,
   parseGitCommand,
   requiresGitConfirmation,
   type GitCommand,
-  type GitFileChange,
 } from '../git/index.ts'
 
 
@@ -90,17 +82,6 @@ const APP_NAME = 'Microcode'
 const INTERACTIVE_SHELL_COMMANDS = new Set(['node', 'codex', 'claude', 'microcode'])
 const NON_INTERACTIVE_FLAGS = new Set(['--help', '-h', '--version', '-v'])
 const MICROCODE_NON_INTERACTIVE_SUBCOMMANDS = new Set(['mcp', 'model'])
-
-interface GatewayAuthControl {
-  listProviders(): Promise<Array<{ id: string; name: string; authChoices: ProviderAuthChoice[] }>>
-  getAuthStatus(): Promise<Array<{ providerId: string; configured: boolean; type?: AuthType; error?: boolean }>>
-  login(providerId: string, authType: AuthType, interaction: {
-    signal: AbortSignal
-    prompt(prompt: AuthPrompt): Promise<string>
-    notify(event: AuthEvent): void
-  }): Promise<void>
-  logout(providerId: string): Promise<void>
-}
 
 interface GatewayBindControl {
   getBindHost(): string
@@ -192,6 +173,11 @@ const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
   { name: 'help', description: 'Show help and available commands' },
 ]
 
+const BASH_TOOL_NAME = TOOL_IDS.bash
+const READ_TOOL_NAME = TOOL_IDS.read
+const WRITE_TOOL_NAME = TOOL_IDS.write
+const EDIT_TOOL_NAME = TOOL_IDS.edit
+
 export class App {
   private ui: TUI
   private headerContainer: Container
@@ -199,13 +185,14 @@ export class App {
   private statusContainer: Container
   private editorContainer: Container
   private workingContainer: Container
-  private agent: MicrocodeAgent
+  private agent: TuiAgentPort
+  private models: TuiModelPort
   private editor!: MicrocodeEditor
   private footer: FooterComponent
   private appLayout!: AppLayout
   private isInitialized = false
   private streamingComponent?: AssistantMessageComponent
-  private streamingMessage?: AssistantMessage
+  private streamingMessage?: Extract<RuntimeMessage, { role: 'assistant' }>
   private pendingTools = new Map<string, ToolUIComponent>()
   private pendingToolStartedAt = new Map<string, number>()
   private streamingToolLastRenderAt = new Map<string, number>()
@@ -217,16 +204,18 @@ export class App {
   private toolElapsedTimer?: ReturnType<typeof setInterval>
   private agentWorking = false
   private lastSigintTime = 0
-  private mcpClient?: McpClientManager
-  private queuedMcpClient?: McpClientManager
-  private pluginManager?: PluginManager
-  private onPluginsChanged?: (snapshot?: PluginSnapshot) => Promise<void>
-  private pluginDiscoveryRefresh?: Promise<PluginSnapshot>
+  private mcpPort?: TuiMcpPort
+  private instructionsPort: TuiInstructionsPort
+  private gitPort: TuiGitPort
+  private pluginPort?: TuiPluginPort
+  private onPluginsChanged?: () => Promise<void>
+  private pluginDiscoveryRefresh?: Promise<TuiPluginSnapshot>
   private pluginDiscoveryRefreshedAt = 0
   private pluginRuntimeRefreshPending = false
-  private sessionManager: SessionManager
+  private sessionManager: TuiSessionPort
   private compacting = false
   private permissionPromptActive = false
+  private activeAuthController?: AbortController
   private pendingEventsWhilePermission: Array<() => void> = []
   private isBashMode = false
   private bashComponent?: BashExecutionComponent
@@ -244,10 +233,8 @@ export class App {
   private firstUserInputForTitle?: string
   private workingText: Text | null = null
   private agentActivityLabel = 'Working…'
-  private modelCompletion?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => Promise<AssistantMessage>
-  private modelCatalog?: { getProjectModels(): readonly Model<Api>[] }
-  private modelAuth?: GatewayAuthControl
   private gatewayBindControl?: GatewayBindControl
+  private unsubscribeRuntimeConnection?: () => void
   private workingStartedAt = 0
   private workingFrameIndex = 0
   private workingTimer: ReturnType<typeof setInterval> | undefined
@@ -255,22 +242,31 @@ export class App {
   onExit?: () => void | Promise<void>
 
   constructor(
-    agent: MicrocodeAgent,
-    mcpClient?: McpClientManager,
-    sessionManager?: SessionManager,
-    modelCompletion?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => Promise<AssistantMessage>,
-    modelCatalog?: { getProjectModels(): readonly Model<Api>[] },
-    modelAuth?: GatewayAuthControl,
+    agent: TuiAgentPort,
+    models: TuiModelPort,
+    mcpPort: TuiMcpPort | undefined,
+    instructionsPort: TuiInstructionsPort,
+    gitPort: TuiGitPort,
+    sessionManager: TuiSessionPort,
     gatewayBindControl?: GatewayBindControl,
   ) {
     this.agent = agent
-    this.mcpClient = mcpClient
-    this.sessionManager = sessionManager ?? new SessionManager()
-    this.modelCompletion = modelCompletion
-    this.modelCatalog = modelCatalog
-    this.modelAuth = modelAuth
+    this.models = models
+    this.mcpPort = mcpPort
+    this.instructionsPort = instructionsPort
+    this.gitPort = gitPort
+    this.sessionManager = sessionManager
     this.gatewayBindControl = gatewayBindControl
-    this.agent.setPersistence(this.sessionManager)
+    let runtimeWasConnected = true
+    this.unsubscribeRuntimeConnection = agent.subscribeRuntimeConnection?.((connected, error) => {
+      if (!connected) {
+        runtimeWasConnected = false
+        this.showError(`Runtime connection lost${error ? `: ${error.message}` : ''}. Reconnecting…`)
+      } else if (!runtimeWasConnected) {
+        runtimeWasConnected = true
+        this.showStatus('Runtime connection restored.')
+      }
+    })
     this.ui = new TUI(new ProcessTerminal())
     // Clear stale rows when a long injected prompt disappears; otherwise Windows consoles can retain it below the footer.
     this.ui.setClearOnShrink(true)
@@ -285,12 +281,8 @@ export class App {
     )
   }
 
-  getSessionManager(): SessionManager {
-    return this.sessionManager
-  }
-
-  setPluginManager(manager: PluginManager, onChanged: (snapshot?: PluginSnapshot) => Promise<void>): void {
-    this.pluginManager = manager
+  setPluginPort(port: TuiPluginPort, onChanged: () => Promise<void>): void {
+    this.pluginPort = port
     this.onPluginsChanged = onChanged
   }
 
@@ -370,7 +362,7 @@ export class App {
       const userInput = stripImagePathsFromText(rawInput)
 
       if (imagePaths.length > 0) {
-        if (modelSupportsImages(this.agent.getCurrentModel())) {
+        if (this.agent.getCurrentModel().input.includes('image')) {
           for (const filePath of imagePaths) {
             const image = tryReadImageFromPath(filePath)
             if (image) {
@@ -409,17 +401,10 @@ export class App {
 
       try {
         await this.refreshPluginDiscovery(true)
-        const withFileContext = await this.addMentionedFileContext(userInput)
-        const withSkillContext = buildSkillMentionContext(
-          withFileContext,
-          this.agent.getSkills().filter((skill) => !this.agent.isSkillLoaded(skill.name)),
-          userInput,
-        )
-        const promptInput = buildPluginMentionContext(withSkillContext, this.pluginManager?.getPlugins() ?? [], userInput)
         if (images.length > 0) {
-          await this.agent.prompt(promptInput, images)
+          await this.agent.prompt(userInput, images)
         } else {
-          await this.agent.prompt(promptInput)
+          await this.agent.prompt(userInput)
         }
         this.clearPendingImages()
       } catch (error: unknown) {
@@ -439,7 +424,7 @@ export class App {
 
     // Editor with border
     this.editor = new MicrocodeEditor(this.ui, getEditorTheme(), { paddingX: 1 })
-    this.editor.getPluginNames = () => (this.pluginManager?.getPlugins() ?? []).filter((plugin) => plugin.enabled).map((plugin) => plugin.name)
+    this.editor.getPluginNames = () => (this.pluginPort?.getPlugins() ?? []).filter((plugin) => plugin.enabled).map((plugin) => plugin.name)
 
     // Set up slash command autocomplete
     this.setupSlashCommands()
@@ -481,7 +466,7 @@ export class App {
         this.imagePathProcessing = true
 
         const newImages: CachedImage[] = []
-        if (modelSupportsImages(this.agent.getCurrentModel())) {
+        if (this.agent.getCurrentModel().input.includes('image')) {
           for (const filePath of imagePaths) {
             const image = tryReadImageFromPath(filePath)
             if (image) {
@@ -591,7 +576,7 @@ export class App {
         if (isPluginAutocompleteContext(textBeforeCursor) && hashPrefix.startsWith('#')) {
           await this.refreshPluginDiscovery(false, false)
           const query = hashPrefix.slice(1).toLowerCase()
-          const matches = filterMentionablePlugins(this.pluginManager?.getPlugins() ?? [], query).slice(0, 100)
+          const matches = filterMentionablePlugins(this.pluginPort?.getPlugins() ?? [], query).slice(0, 100)
           if (matches.length === 0) return null
           return {
             items: matches.map((plugin) => ({
@@ -690,20 +675,12 @@ export class App {
     this.editor.setAutocompleteProvider(provider)
   }
 
-  private async addMentionedFileContext(input: string): Promise<string> {
-    const cwd = this.agent.getSnapshot().cwd
-    const indexedFiles = new Set(await this.getWorkspaceFiles())
-    return buildWorkspaceFileContext(cwd, input, indexedFiles, async (path) => {
-      return this.authorizeMentionedFileRead(cwd, path)
-    })
-  }
-
   private async addMentionedImages(input: string): Promise<void> {
     const cwd = this.agent.getSnapshot().cwd
     const indexedFiles = new Set(await this.getWorkspaceFiles(true))
     const paths = getMentionedImagePaths(input, indexedFiles)
     if (paths.length === 0) return
-    if (!modelSupportsImages(this.agent.getCurrentModel())) {
+    if (!this.agent.getCurrentModel().input.includes('image')) {
       this.showStatus('Current model does not support image input. Switch to a vision-capable model.')
       return
     }
@@ -735,7 +712,7 @@ export class App {
 
   private async authorizeMentionedFileRead(cwd: string, path: string): Promise<boolean> {
     const permissionInput = { file_path: resolve(cwd, path) }
-    const permission = this.agent.checkPermission(READ_TOOL_NAME, permissionInput)
+    const permission = await this.agent.checkPermission(READ_TOOL_NAME, permissionInput)
     if (permission.allowed) return true
     if (permission.reason !== 'ask') return false
     return this.agent.requestToolPermission(
@@ -751,7 +728,7 @@ export class App {
       this.showStatus('Clipboard has no supported image, or image clipboard access is unavailable.')
       return
     }
-    if (!modelSupportsImages(this.agent.getCurrentModel())) {
+    if (!this.agent.getCurrentModel().input.includes('image')) {
       this.showStatus('Current model does not support image input. Switch to a vision-capable model.')
       return
     }
@@ -1009,13 +986,15 @@ export class App {
   private async handleExportCommand(): Promise<void> {
     try {
       await this.agent.persistMessages()
-      const metadata = this.sessionManager.getMetadata()
-      if (!metadata) {
+      if (!this.sessionManager.getMetadata()) {
         this.showError('There is no saved conversation to export yet.')
         return
       }
-
-      const destinationPath = await exportSessionJsonl(metadata.path, process.cwd(), metadata.id)
+      const destinationPath = await this.sessionManager.exportCurrent()
+      if (!destinationPath) {
+        this.showError('There is no saved conversation to export yet.')
+        return
+      }
       this.showStatus(`Conversation exported to ${destinationPath}`)
     } catch (error) {
       this.showError(`Could not export conversation: ${error instanceof Error ? error.message : String(error)}`)
@@ -1028,23 +1007,6 @@ export class App {
       return
     }
 
-    const cwd = process.cwd()
-    let before: MicroFileSnapshot
-    try {
-      before = await readMicroFile(cwd)
-    } catch (error) {
-      this.showError(`Could not read MICRO.md: ${error instanceof Error ? error.message : String(error)}`)
-      return
-    }
-    const targetPath = before.path
-    let fileOutline: string[]
-    try {
-      fileOutline = await getInitProjectFileOutline(cwd)
-    } catch (error) {
-      this.showError(`Could not inspect project layout: ${error instanceof Error ? error.message : String(error)}`)
-      return
-    }
-
     const timeline = new TurnTimeline()
     timeline.addEntry(new UserMessage('/init'), 'user')
     this.activeTurnTimeline = timeline
@@ -1052,88 +1014,54 @@ export class App {
     this.turnFinalized = false
     this.ui.requestRender()
 
-    const messageCountBeforeInit = this.agent.getMessages().length
-    let promptError: unknown
+    let prepared: Awaited<ReturnType<TuiInstructionsPort['prepareInit']>>
     try {
-      await this.agent.promptReadOnly(buildInitTaskPrompt(cwd, fileOutline))
+      prepared = await this.instructionsPort.prepareInit()
     } catch (error) {
-      promptError = error
+      this.showError(`Project initialization failed: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    if (prepared.proposal === undefined) {
+      this.showError('The project analysis did not return a complete MICRO.md proposal. No files were changed.')
+      return
+    }
+    if (new TextEncoder().encode(prepared.proposal).byteLength > prepared.maxBytes) {
+      this.showError(`The MICRO.md proposal exceeds the ${prepared.maxBytes}-byte project instruction limit. Ask for a shorter proposal.`)
+      return
+    }
+    if (prepared.proposal === prepared.currentContent) {
+      this.showStatus('MICRO.md already matches the proposed project guidance.')
+      return
     }
 
-    if (promptError) {
-      this.showError(`Project initialization failed: ${promptError instanceof Error ? promptError.message : String(promptError)}`)
+    const proposalDiff = createTwoFilesPatch(
+      prepared.path,
+      prepared.path,
+      prepared.currentContent,
+      prepared.proposal,
+      'current',
+      'proposed',
+    )
+    this.chatContainer.addChild(new Spacer(1))
+    this.chatContainer.addChild(new Text(proposalDiff, 1, 0))
+    this.ui.requestRender()
+
+    const decision = await this.selectAuthOption(`Apply the proposed ${prepared.path}?`, [
+      { value: 'apply', label: 'Apply MICRO.md', description: 'Write the reviewed proposal to this file' },
+      { value: 'cancel', label: 'Cancel', description: 'Leave MICRO.md unchanged' },
+    ])
+    if (decision !== 'apply') {
+      this.showStatus('MICRO.md update cancelled. No files were changed.')
       return
     }
 
     try {
-      const latestAssistant = this.agent.getMessages().slice(messageCountBeforeInit).reverse()
-        .find((message): message is AssistantMessage => message.role === 'assistant')
-      const response = latestAssistant?.content
-        .reduce((text, block) => block.type === 'text' ? `${text}${block.text}\n` : text, '') ?? ''
-      const proposal = extractInitDraft(response)
-      if (proposal === undefined) {
-        this.showError('The project analysis did not return a complete MICRO.md proposal. No files were changed.')
-        return
-      }
-      if (Buffer.byteLength(proposal, 'utf8') > DEFAULT_PROJECT_INSTRUCTIONS_MAX_BYTES) {
-        this.showError(`The MICRO.md proposal exceeds the ${DEFAULT_PROJECT_INSTRUCTIONS_MAX_BYTES}-byte project instruction limit. Ask for a shorter proposal.`)
-        return
-      }
-      if (proposal === before.content) {
-        this.showStatus('MICRO.md already matches the proposed project guidance.')
-        return
-      }
-
-      const proposalDiff = createTwoFilesPatch(
-        targetPath,
-        targetPath,
-        before.content ?? '',
-        proposal,
-        'current',
-        'proposed',
-      )
-      this.chatContainer.addChild(new Spacer(1))
-      this.chatContainer.addChild(new Text(proposalDiff, 1, 0))
-      this.ui.requestRender()
-
-      const decision = await this.selectAuthOption(`Apply the proposed ${targetPath}?`, [
-        { value: 'apply', label: 'Apply MICRO.md', description: 'Write the reviewed proposal to this file' },
-        { value: 'cancel', label: 'Cancel', description: 'Leave MICRO.md unchanged' },
-      ])
-      if (decision !== 'apply') {
-        this.showStatus('MICRO.md update cancelled. No files were changed.')
-        return
-      }
-
-      const currentInstructions = await loadProjectInstructions(cwd)
-      const otherInstructionBytes = currentInstructions.files
-        .filter((file) => file.path !== targetPath)
-        .reduce((total, file) => total + file.bytes, 0)
-      if (otherInstructionBytes + Buffer.byteLength(proposal, 'utf8') > DEFAULT_PROJECT_INSTRUCTIONS_MAX_BYTES) {
-        this.showError('The proposal does not fit in the remaining project instruction budget. Shorten existing instruction files or ask for a shorter MICRO.md proposal.')
-        return
-      }
-
-      await writeMicroFile(cwd, before, proposal)
+      await this.instructionsPort.applyInit(prepared.revision, prepared.proposal)
+      this.showStatus(`Project instructions saved to ${prepared.path} and reloaded.`)
     } catch (error) {
       this.showError(`Could not save MICRO.md: ${error instanceof Error ? error.message : String(error)}`)
-      return
-    }
-
-    try {
-      const instructions = await loadProjectInstructions(cwd)
-      this.agent.updateProjectInstructions(instructions)
-      const loadedFile = instructions.files.find((file) => file.path === targetPath)
-      if (!loadedFile || loadedFile.truncated || loadedFile.content !== proposal) {
-        this.showError(`MICRO.md was saved, but the complete file could not be loaded within the ${DEFAULT_PROJECT_INSTRUCTIONS_MAX_BYTES}-byte combined instruction limit.`)
-        return
-      }
-      this.showStatus(`Project instructions saved to ${targetPath} and reloaded.`)
-    } catch (error) {
-      this.showError(`MICRO.md was saved, but project instructions could not be reloaded: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-
   private async handleInstructionsCommand(args: string): Promise<void> {
     const option = args.trim().toLowerCase()
     if (option && option !== 'reload') {
@@ -1147,8 +1075,7 @@ export class App {
         return
       }
       try {
-        const instructions = await loadProjectInstructions(process.cwd())
-        this.agent.updateProjectInstructions(instructions)
+        const instructions = await this.instructionsPort.reload()
         this.showStatus(`Reloaded project instructions (${instructions.files.length} files, ${instructions.totalBytes} bytes).`)
         for (const diagnostic of instructions.diagnostics) {
           this.chatContainer.addChild(new Text(`  ${theme.dim(diagnostic)}`, 1, 0))
@@ -1180,94 +1107,8 @@ export class App {
       this.ui.requestRender()
     }
   }
-
   private async handleAuthCommand(action: 'login' | 'logout' | 'status', args: string): Promise<void> {
-    if (this.modelAuth) {
-      await this.handleGatewayAuthCommand(action, args, this.modelAuth)
-      return
-    }
-    const abortController = new AbortController()
-    try {
-      const models = getModels()
-      if (action === 'status') {
-        const providers = models.getProviders()
-        const statuses: SelectItem[] = []
-        for (const provider of providers) {
-          let status = 'not configured'
-          try {
-            const auth = await models.checkAuth(provider.id)
-            if (auth) status = `${auth.type}${auth.source ? ` · ${auth.source}` : ''}`
-          } catch (error) {
-            status = `error · ${error instanceof Error ? error.message : String(error)}`
-          }
-          statuses.push({ value: provider.id, label: provider.name, description: `${provider.id} · ${status}` })
-        }
-        await this.selectAuthOption('Provider authentication status', statuses)
-        return
-      }
-
-      const [providerArg, requestedType] = args.trim().split(/\s+/, 2)
-      const providerId = providerArg || await this.selectAuthOption(
-        action === 'login' ? 'Choose a provider to sign in' : 'Choose a provider to sign out',
-        models.getProviders().map((provider) => ({ value: provider.id, label: provider.name, description: provider.id })),
-      )
-      if (!providerId) return
-      const provider = models.getProvider(providerId)
-      if (!provider) throw new Error(`Unknown provider "${providerId}". Run /auth to list providers.`)
-
-      if (action === 'logout') {
-        await models.logout(providerId)
-        this.showStatus(`Signed out of ${provider.name}.`)
-        return
-      }
-
-      const authChoices = getProviderAuthChoices(provider)
-      if (authChoices.length === 0) {
-        throw new Error(`Provider ${provider.name} has no interactive sign-in method. Configure its ambient credentials and try again.`)
-      }
-      const requestedAuthType: AuthType | undefined = requestedType === 'oauth' || requestedType === 'api_key'
-        ? requestedType
-        : undefined
-      if (requestedAuthType && !authChoices.some((choice) => choice.value === requestedAuthType)) {
-        throw new Error(`Provider ${provider.name} does not support ${requestedAuthType === 'oauth' ? 'OAuth' : 'interactive API key'} login.`)
-      }
-      const type: AuthType | undefined = requestedAuthType
-        ?? (authChoices.length > 1
-          ? await this.selectAuthOption(`Choose a sign-in method for ${provider.name}`, authChoices) as AuthType | undefined
-          : authChoices[0]?.value)
-      if (!type) return
-      await models.login(providerId, type, {
-        signal: abortController.signal,
-        prompt: async (prompt) => {
-          if (prompt.type !== 'select') return this.promptAuthValue(prompt, abortController)
-          const selected = await this.selectAuthOption(prompt.message, prompt.options, prompt.signal)
-          if (!selected) {
-            if (!prompt.signal?.aborted) abortController.abort()
-            throw new Error('Authentication cancelled.')
-          }
-          return selected
-        },
-        notify: (event) => {
-          if (event.type === 'auth_url') {
-            this.showStatus(`${event.instructions ?? 'Complete authorization in your browser.'} ${event.url}`)
-            void this.openAuthUrl(event.url)
-          } else if (event.type === 'device_code') {
-            this.showStatus(`Code: ${event.userCode} · ${event.verificationUri}`)
-            void this.openAuthUrl(event.verificationUri)
-          } else {
-            this.showStatus(event.message)
-          }
-        },
-      })
-      this.showStatus(`Signed in to ${provider.name}.`)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (abortController.signal.aborted || /cancel(?:led|ed)/i.test(message)) {
-        if (action === 'login') this.showStatus('Sign-in cancelled.')
-        return
-      }
-      this.showError(message)
-    }
+    await this.handleModelAuthCommand(action, args, this.models)
   }
 
   private async handleGatewayCommand(args: string): Promise<void> {
@@ -1288,7 +1129,7 @@ export class App {
     const currentHost = control.getBindHost()
     const addresses = [...new Set(Object.values(networkInterfaces()).flatMap((entries) =>
       (entries ?? [])
-        .filter((entry) => !entry.internal && (entry.family === 'IPv4' || entry.family === 4))
+        .filter((entry) => !entry.internal && entry.family === 'IPv4')
         .map((entry) => entry.address)))]
     const choices: SelectItem[] = [
       { value: '127.0.0.1', label: 'Loopback · 127.0.0.1', description: 'Only accept connections from this computer' },
@@ -1351,12 +1192,13 @@ export class App {
     }
   }
 
-  private async handleGatewayAuthCommand(action: 'login' | 'logout' | 'status', args: string, gateway: GatewayAuthControl): Promise<void> {
+  private async handleModelAuthCommand(action: 'login' | 'logout' | 'status', args: string, auth: Pick<TuiModelPort, 'listProviders' | 'getAuthStatus' | 'login' | 'logout'>): Promise<void> {
     const abortController = new AbortController()
+    this.activeAuthController = abortController
     try {
-      const providers = await gateway.listProviders()
+      const providers = await auth.listProviders()
       if (action === 'status') {
-        const statuses = await gateway.getAuthStatus()
+        const statuses = await auth.getAuthStatus()
         const byId = new Map(statuses.map((status) => [status.providerId, status]))
         await this.selectAuthOption('Provider authentication status', providers.map((provider) => {
           const auth = byId.get(provider.id)
@@ -1376,7 +1218,7 @@ export class App {
       if (!provider) throw new Error(`Unknown provider "${providerId}". Run /auth to list providers.`)
 
       if (action === 'logout') {
-        await gateway.logout(providerId)
+        await auth.logout(providerId)
         this.showStatus(`Signed out of ${provider.name}.`)
         return
       }
@@ -1384,7 +1226,7 @@ export class App {
       if (provider.authChoices.length === 0) {
         throw new Error(`Provider ${provider.name} has no interactive sign-in method. Configure its ambient credentials and try again.`)
       }
-      const requestedAuthType: AuthType | undefined = requestedType === 'oauth' || requestedType === 'api_key'
+      const requestedAuthType: ModelAuthType | undefined = requestedType === 'oauth' || requestedType === 'api_key'
         ? requestedType
         : undefined
       if (requestedAuthType && !provider.authChoices.some((choice) => choice.value === requestedAuthType)) {
@@ -1392,11 +1234,11 @@ export class App {
       }
       const type = requestedAuthType
         ?? (provider.authChoices.length > 1
-          ? await this.selectAuthOption(`Choose a sign-in method for ${provider.name}`, provider.authChoices) as AuthType | undefined
+          ? await this.selectAuthOption(`Choose a sign-in method for ${provider.name}`, provider.authChoices) as ModelAuthType | undefined
           : provider.authChoices[0]?.value)
       if (!type) return
 
-      await gateway.login(providerId, type, {
+      await auth.login(providerId, type, {
         signal: abortController.signal,
         prompt: async (prompt) => {
           if (prompt.type !== 'select') return this.promptAuthValue(prompt, abortController)
@@ -1407,7 +1249,7 @@ export class App {
           }
           return selected
         },
-        notify: (event) => {
+        notify: (event: ModelAuthEvent) => {
           if (event.type === 'auth_url') {
             this.showStatus(`${event.instructions ?? 'Complete authorization in your browser.'} ${event.url}`)
             void this.openAuthUrl(event.url)
@@ -1427,10 +1269,12 @@ export class App {
         return
       }
       this.showError(message)
+    } finally {
+      if (this.activeAuthController === abortController) this.activeAuthController = undefined
     }
   }
 
-  private async promptAuthValue(prompt: AuthPrompt, authController?: AbortController): Promise<string> {
+  private async promptAuthValue(prompt: ModelAuthPrompt, authController?: AbortController): Promise<string> {
     if (prompt.type === 'manual_code') return this.promptAuthCode(prompt, authController)
     const placeholder = 'placeholder' in prompt ? prompt.placeholder : undefined
     const secret = prompt.type === 'secret'
@@ -1525,7 +1369,7 @@ export class App {
     })
   }
 
-  private promptAuthCode(prompt: Extract<AuthPrompt, { type: 'manual_code' }>, authController?: AbortController): Promise<string> {
+  private promptAuthCode(prompt: Extract<ModelAuthPrompt, { type: 'manual_code' }>, authController?: AbortController): Promise<string> {
     const previousSubmit = this.editor.onSubmit
     const previousEscape = this.editor.onEscape
     const notice = new Text(theme.fg('accent', `${prompt.message} Press Esc to cancel.`), 1, 0)
@@ -1729,7 +1573,7 @@ export class App {
     // Show the current session's accumulated usage by model.
     const mergedByModel: Record<string, { modelId: string; provider: string; api: string; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalTokens: number; totalCost: number }> = {}
 
-    const mergeStats = (stats: Readonly<import('../agent/AgentTokenTracker.js').AgentTokenSnapshot>) => {
+    const mergeStats = (stats: Readonly<TuiTokenSnapshot>) => {
       for (const [key, mu] of Object.entries(stats.byModel)) {
         const existing = mergedByModel[key]
         if (existing) {
@@ -1855,11 +1699,8 @@ export class App {
         await this.agent.persistMessages()
         const messages = await this.sessionManager.switchToSession(selected)
 
-        // Replace messages on agent
-        this.agent.replaceMessages(messages, 'rebuild')
-
         // Rebuild system prompt preserving loaded skills
-        this.rebuildSystemPromptForResume()
+        await this.rebuildSystemPromptForResume()
 
         // Clear and re-render chat
         this.rerenderChat(messages)
@@ -1896,7 +1737,7 @@ export class App {
       return
     }
 
-    let lists: TaskList[]
+    let lists: TuiTaskList[]
     try {
       lists = await this.sessionManager.listTaskLists()
     } catch (error) {
@@ -1964,7 +1805,7 @@ export class App {
       return undefined
     })
 
-    const showTasks = (list: TaskList) => {
+    const showTasks = (list: TuiTaskList) => {
       this.chatContainer.removeChild(activeSelect)
       heading.setText(
         `${theme.fg('accent', list.title)}  ${theme.dim('(Space toggle · Enter confirm · Esc back)')}`,
@@ -2096,7 +1937,7 @@ export class App {
     this.sessionManager.beginDraft(process.cwd())
 
     // Reset state
-    this.agent.clearMessages()
+    await this.agent.clearMessages()
     this.activeTurnTimeline = undefined
     this.toolRows.clear()
     this.pendingTools.clear()
@@ -2136,22 +1977,12 @@ export class App {
     text = text.replace(/\s+/g, ' ').trim()
     if (!text) return
 
-    const title = await createSessionTitle(text, async (openingSentence) => {
-      const model = this.agent.getCurrentModel()
-      const complete = this.modelCompletion ?? ((selectedModel, context, options) => getModels().completeSimple(selectedModel, context, options))
-      const result = await complete(model, {
-        systemPrompt: 'Generate a short, concise title (5 words max) for a conversation. Reply with ONLY the title, no quotes, no explanation.',
-        messages: [{ role: 'user', content: [{ type: 'text', text: `Generate a title for a conversation that starts with: "${openingSentence.slice(0, 200)}"` }] }],
-      } as any, { maxTokens: 30, temperature: 0.3 })
-
-      const titleContent = result.content.find((c: any) => c.type === 'text') as any
-      return titleContent?.text?.trim().replace(/^["']|["']$/g, '') ?? ''
-    })
+    const title = await createSessionTitle(text, (openingSentence) => this.models.suggestSessionTitle(openingSentence))
 
     const sessionId = this.sessionManager.getSessionId()
     if (sessionId) {
       const conciseTitle = normalizeSessionTitle(title)
-      this.sessionManager.setTitle(sessionId, conciseTitle)
+      await this.sessionManager.setTitle(sessionId, conciseTitle)
       this.footer.setSessionTitle(conciseTitle)
       this.footer.invalidate()
       this.ui.requestRender()
@@ -2161,8 +1992,8 @@ export class App {
   /**
    * Rebuild system prompt for a resumed session, preserving loaded skills.
    */
-  private rebuildSystemPromptForResume(): void {
-    this.agent.refreshSystemPrompt()
+  private async rebuildSystemPromptForResume(): Promise<void> {
+    await this.agent.refreshSystemPrompt()
   }
 
   /** Render messages loaded by `--resume` before the first input prompt appears. */
@@ -2180,7 +2011,7 @@ export class App {
   /**
    * Clear the chat container and re-render all messages from history.
    */
-  private rerenderChat(messages: AgentMessage[]): void {
+  private rerenderChat(messages: RuntimeMessage[]): void {
     this.chatContainer.clear()
     this.toolRows.clear()
     this.pendingTools.clear()
@@ -2190,13 +2021,13 @@ export class App {
     for (const msg of messages) {
       if (msg.role === 'user') {
         let text = ''
-        let images: ImageContent[] | undefined
+        let images: Array<{ mimeType: string }> | undefined
         if (typeof msg.content === 'string') {
           text = msg.content
         } else if (Array.isArray(msg.content)) {
           const textParts = msg.content.filter((c: any) => c.type === 'text').map((c: any) => c.text)
           text = textParts.join('\n')
-          const imageParts = msg.content.filter((c: any) => c.type === 'image') as ImageContent[]
+          const imageParts = msg.content.filter((c) => c.type === 'image').map((c) => ({ mimeType: c.mime_type }))
           if (imageParts.length > 0) images = imageParts
         }
         const timeline = new TurnTimeline()
@@ -2211,39 +2042,41 @@ export class App {
           this.chatContainer.addChild(this.activeTurnTimeline)
         }
         const component = new AssistantMessageComponent(getMarkdownTheme())
-        component.updateContent(msg as any)
+        component.updateContent(msg.content)
         this.activeTurnTimeline.addEntry(component, 'assistant')
 
         for (const block of msg.content) {
-          if (block.type !== 'toolCall') continue
-          const row = this.createToolRow(block.id, block.name, block.arguments ?? {})
+          if (block.type !== 'tool_call') continue
+          const row = this.createToolRow(block.call_id, block.tool_id, block.arguments ?? {})
           dispatchToolLifecycle(row, { phase: 'running' })
           this.activeTurnTimeline.addEntry(row, 'tool')
         }
 
-        if (msg.stopReason === 'aborted') {
+        if (msg.stop_reason === 'aborted') {
           this.activeTurnTimeline.addEntry(new Text(theme.fg('error', 'Interrupted'), 1, 0))
           this.turnFinalized = true
-        } else if (msg.stopReason === 'error') {
-          this.activeTurnTimeline.addEntry(new Text(theme.fg('error', `Error: ${msg.errorMessage || 'Unknown error'}`), 1, 0))
+        } else if (msg.stop_reason === 'error') {
+          this.activeTurnTimeline.addEntry(new Text(theme.fg('error', `Error: ${msg.error_message || 'Unknown error'}`), 1, 0))
           this.turnFinalized = true
-        } else if (msg.stopReason === 'stop') {
+        } else if (msg.stop_reason === 'stop') {
           this.turnFinalized = true
         }
-      } else if ((msg as any).role === 'toolResult') {
-        const toolResult = msg as any
-        let row = this.toolRows.get(toolResult.toolCallId)
+      } else if (msg.role === 'tool_result') {
+        const toolResult = msg
+        let row = this.toolRows.get(toolResult.call_id)
         if (!row) {
-          row = this.createToolRow(toolResult.toolCallId, toolResult.toolName, {})
+          row = this.createToolRow(toolResult.call_id, toolResult.tool_id, {})
           dispatchToolLifecycle(row, { phase: 'running' })
           this.appendTurnEntry(row, 'tool')
         }
         dispatchToolLifecycle(row, {
-          phase: toolResult.isError === true ? 'failed' : 'completed',
+          phase: toolResult.is_error ? 'failed' : 'completed',
           result: {
-            content: toolResult.content ?? [],
-            isError: toolResult.isError === true,
-            ...(toolResult.details && typeof toolResult.details === 'object' ? { details: toolResult.details } : {}),
+            content: toolResult.content.map((block) => block.type === 'image'
+              ? { type: 'image', data: block.data, mimeType: block.mime_type }
+              : { type: 'text', text: block.text }),
+            isError: toolResult.is_error,
+            ...(toolResult.details && typeof toolResult.details === 'object' ? { details: toolResult.details as Record<string, unknown> } : {}),
           },
         })
       }
@@ -2253,41 +2086,35 @@ export class App {
   }
 
   private async handleModelCommand(searchTerm?: string): Promise<void> {
-    let allModels: Model<Api>[]
+    let catalog: ModelCatalogSnapshot
     try {
-      allModels = [...(this.modelCatalog?.getProjectModels() ?? getAllModels())]
+      catalog = await this.models.getCatalog()
     } catch (error) {
       this.showError(`Could not load models: ${error instanceof Error ? error.message : String(error)}`)
       return
     }
+    const allModels = [...catalog.models]
 
     if (searchTerm?.trim()) {
       const term = searchTerm.trim()
-      const exact = allModels.filter((model) => `${model.provider}/${model.id}` === term || model.id === term)
+      const exact = allModels.filter((model) => model.id === term || model.modelId === term)
       if (exact.length === 1) {
-        this.switchModel(`${exact[0]!.provider}/${exact[0]!.id}`)
+        const model = exact[0]!
+        void this.switchModel(model.modelId, model.apiId, model.providerId)
         return
       }
       this.showModelChoices(allModels.filter((model) =>
-        `${model.provider} ${model.id} ${model.name}`.toLowerCase().includes(term.toLowerCase()),
+        `${model.providerId} ${model.modelId} ${model.name}`.toLowerCase().includes(term.toLowerCase()),
       ), `Models matching “${term}”`)
       return
     }
 
-    const providers = this.modelCatalog
-      ? [...new Set(allModels.map((model) => String(model.provider)))].map((providerId) => ({
-          value: providerId,
-          label: providerId,
-          description: `${allModels.filter((model) => String(model.provider) === providerId).length} models · ${providerId}`,
-        }))
-      : getModels().getProviders()
-          .map((provider) => ({
-            value: provider.id,
-            label: provider.name,
-            description: `${allModels.filter((model) => model.provider === provider.id).length} models · ${provider.id}`,
-          }))
-          .filter((provider) => !provider.description.startsWith('0 models'))
-    const currentProvider = String(this.agent.getCurrentModel().provider)
+    const providers = catalog.providers.map((provider) => ({
+      value: provider.id,
+      label: provider.name,
+      description: `${provider.models.length} models · ${provider.id}`,
+    }))
+    const currentProvider = this.agent.getCurrentModel().provider_id
     const items: SelectItem[] = providers.map((provider) => ({ ...provider, label: `${provider.label}${provider.value === currentProvider ? ' (current)' : ''}` }))
     const selectList = new SelectList(items, Math.min(items.length, 12), {
       selectedPrefix: (text) => chalk.cyan(text),
@@ -2306,7 +2133,7 @@ export class App {
       removeFilter()
       this.chatContainer.removeChild(selectList)
       this.chatContainer.removeChild(providerTitle)
-      this.showModelChoices(allModels.filter((model) => model.provider === item.value), `${item.label} models`)
+      this.showModelChoices(allModels.filter((model) => model.providerId === item.value), `${item.label} models`)
     }
     selectList.onCancel = () => {
       removeFilter()
@@ -2318,22 +2145,25 @@ export class App {
     }
   }
 
-  private showModelChoices(models: Model<Api>[], title: string): void {
+  private showModelChoices(models: ModelDescriptor[], title: string): void {
     if (models.length === 0) {
       this.showError('No matching models.')
       return
     }
     const currentModel = this.agent.getCurrentModel()
-    const currentId = currentModel.id
-    const currentApi = currentModel.api
-    const currentProvider = currentModel.provider
+    const currentId = currentModel.model_id
+    const currentApi = currentModel.api_id
+    const currentProvider = currentModel.provider_id
 
-    const items: SelectItem[] = models.sort((a, b) => a.id.localeCompare(b.id)).map((m) => {
-      const isCurrent = m.id === currentId && m.api === currentApi && m.provider === currentProvider
+    const modelsBySelectionKey = new Map<string, ModelDescriptor>()
+    const items: SelectItem[] = [...models].sort((a, b) => a.modelId.localeCompare(b.modelId)).map((m) => {
+      const isCurrent = m.modelId === currentId && m.apiId === currentApi && m.providerId === currentProvider
+      const selectionKey = JSON.stringify([m.providerId, m.modelId, m.apiId])
+      modelsBySelectionKey.set(selectionKey, m)
       return {
-        value: `${m.provider}/${m.id}`,
-        label: `${m.name ?? m.id}${isCurrent ? ' (current)' : ''}`,
-        description: `${m.id} · ${m.api}`,
+        value: selectionKey,
+        label: `${m.name || m.modelId}${isCurrent ? ' (current)' : ''}`,
+        description: `${m.modelId} · ${m.apiId}`,
       }
     })
 
@@ -2377,7 +2207,8 @@ export class App {
       this.chatContainer.removeChild(titleText)
 
       if (selectedValue) {
-        this.switchModel(selectedValue)
+        const selected = modelsBySelectionKey.get(selectedValue)
+        if (selected) void this.switchModel(selected.modelId, selected.apiId, selected.providerId)
       }
 
       this.chatContainer.addChild(new Spacer(1))
@@ -2395,12 +2226,12 @@ export class App {
   }
 
   /** Switch to a model by ID and update all dependent state. */
-  private switchModel(modelId: string, api?: Api): void {
+  private async switchModel(modelId: string, api?: string, provider?: string): Promise<void> {
     try {
       const slash = modelId.indexOf('/')
-      const provider = slash > 0 ? modelId.slice(0, slash) : undefined
-      const id = provider ? modelId.slice(slash + 1) : modelId
-      const snapshot = this.agent.switchModel(id, api, provider)
+      const parsedProvider = slash > 0 ? modelId.slice(0, slash) : undefined
+      const id = parsedProvider ? modelId.slice(slash + 1) : modelId
+      const snapshot = await this.models.switchModel(id, api, provider ?? parsedProvider)
       const model = snapshot.model
 
       // Clear image state on model switch
@@ -2410,16 +2241,19 @@ export class App {
       // Rebuild footer with new model info
       this.footer.invalidate()
 
-      this.showStatus(`Model switched to: ${snapshot.provider}/${model.id} (${model.api})`)
+      this.showStatus(`Model switched to: ${snapshot.provider}/${model.model_id} (${model.api_id})`)
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error))
     }
   }
 
   private async handleMcpCommand(args: string): Promise<void> {
-    const mcpClient = this.mcpClient
-    if (!mcpClient) {
-      this.showError('No MCP client available.')
+    if (this.agent.getRuntimeCapabilities) {
+      await this.handleRuntimeMcpCommand(args)
+      return
+    }
+    if (!this.mcpPort) {
+      this.showError('MCP management is unavailable.')
       return
     }
     if (args.trim()) {
@@ -2427,35 +2261,27 @@ export class App {
       return
     }
 
-    let registry: McpCapabilitiesResult
+    let snapshot: TuiMcpSnapshot
     try {
       if (this.agent.isBusy()) {
         this.showStatus('MCP runtime refresh will be applied after the active turn finishes.')
-        await this.pluginManager?.refresh()
+        await this.pluginPort?.refresh()
       } else {
         await this.onPluginsChanged?.()
       }
-      registry = await discoverMcpCapabilities(process.cwd())
+      snapshot = await this.mcpPort.refresh()
     } catch (error) {
-      this.showError(`Could not discover MCP servers: ${error instanceof Error ? error.message : String(error)}`)
+      this.showError(`Could not refresh MCP servers: ${error instanceof Error ? error.message : String(error)}`)
       return
     }
+    this.renderMcpSnapshot(snapshot)
+  }
 
-    let removedStaleDirectoryServer = false
-    for (const state of mcpClient.getServerStates()) {
-      const definition = registry.servers.find((item) => item.name === state.name && (item.scope === 'user' || item.scope === 'project'))
-      if (definition && JSON.stringify(definition.config) !== JSON.stringify(state.config)) {
-        await mcpClient.removeServer(state.name)
-        removedStaleDirectoryServer = true
-      }
-    }
-    if (removedStaleDirectoryServer) this.updateMcpState(mcpClient)
-
-    const states = mcpClient.getServerStates()
-    const pluginMcpServers = (this.pluginManager?.getPlugins() ?? []).flatMap((plugin) =>
+  private renderMcpSnapshot(snapshot: TuiMcpSnapshot): void {
+    const pluginMcpServers = (this.pluginPort?.getPlugins() ?? []).flatMap((plugin) =>
       plugin.servers.map((server) => ({ plugin, server })),
     )
-    if (states.length === 0 && registry.servers.length === 0 && pluginMcpServers.length === 0) {
+    if (snapshot.servers.length === 0 && snapshot.configuredServers.length === 0 && pluginMcpServers.length === 0) {
       this.chatContainer.addChild(
         new Text(theme.dim('No MCP servers configured.'), 1, 0),
       )
@@ -2470,7 +2296,7 @@ export class App {
     this.chatContainer.addChild(new Spacer(1))
 
     const pluginServerNames = new Set(pluginMcpServers.map(({ server }) => server.qualifiedName))
-    for (const state of states) {
+    for (const state of snapshot.servers) {
       if (pluginServerNames.has(state.name)) continue
       const statusIcon = state.status === 'connected' ? '✓'
         : state.status === 'failed' ? '✗'
@@ -2480,18 +2306,24 @@ export class App {
       this.chatContainer.addChild(new Text(statusLine, 1, 0))
 
       if (state.status === 'connected' && state.tools.length > 0) {
-        const toolNames = state.tools.map(t => t.name).join(', ')
+        const toolNames = state.tools.join(', ')
         this.chatContainer.addChild(
           new Text(`  ${theme.dim('Tools:')} ${toolNames}`, 1, 0),
         )
+      } else if (state.status === 'connected' && state.toolCount > 0) {
+        this.chatContainer.addChild(new Text(`  ${theme.dim(`${state.toolCount} tools`)}`, 1, 0))
       }
 
       if (state.status === 'connected' && state.resources.length > 0) {
-        const resourceNames = state.resources.map(r => r.name).join(', ')
+        const resourceNames = state.resources.join(', ')
         this.chatContainer.addChild(
           new Text(`  ${theme.dim('Resources:')} ${resourceNames}`, 1, 0),
         )
+      } else if (state.status === 'connected' && state.resourceCount > 0) {
+        this.chatContainer.addChild(new Text(`  ${theme.dim(`${state.resourceCount} resources`)}`, 1, 0))
       }
+
+      if (state.summary) this.chatContainer.addChild(new Text(`  ${theme.dim(state.summary)}`, 1, 0))
 
       if (state.status === 'failed' && state.error) {
         this.chatContainer.addChild(
@@ -2500,21 +2332,21 @@ export class App {
       }
     }
 
-    for (const server of registry.servers) {
-      const runtime = states.find((state) => state.name === server.name)
+    for (const server of snapshot.configuredServers) {
+      const runtime = snapshot.servers.find((state) => state.name === server.name)
       this.chatContainer.addChild(new Text(`  ${theme.bold(server.name)} · ${server.scope}${server.packageName ? `/${server.packageName}` : ''} · ${runtime?.status ?? 'starting'}`, 1, 0))
       if (server.sourcePath) this.chatContainer.addChild(new Text(`    ${theme.dim(server.sourcePath)}`, 1, 0))
     }
     for (const { plugin, server } of pluginMcpServers) {
-      const runtime = states.find((state) => state.name === server.qualifiedName)
+      const runtime = snapshot.servers.find((state) => state.name === server.qualifiedName)
       const runtimeStatus = !plugin.enabled ? 'plugin disabled' : runtime?.status ?? 'starting'
       this.chatContainer.addChild(new Text(`  ${theme.bold(server.qualifiedName)} · plugin ${plugin.name} · ${runtimeStatus}`, 1, 0))
       this.chatContainer.addChild(new Text(`    ${theme.dim(`${server.transport} · ${server.safeCommandSummary} · ${server.sourcePath}`)}`, 1, 0))
       if (runtime?.status === 'connected' && runtime.tools.length > 0) {
-        this.chatContainer.addChild(new Text(`    ${theme.dim(`Tools: ${runtime.tools.map((tool) => tool.name).join(', ')}`)}`, 1, 0))
+        this.chatContainer.addChild(new Text(`    ${theme.dim(`Tools: ${runtime.tools.join(', ')}`)}`, 1, 0))
       }
     }
-    for (const diagnostic of registry.diagnostics) {
+    for (const diagnostic of snapshot.diagnostics) {
       this.chatContainer.addChild(new Text(`  ${theme.dim(diagnostic)}`, 1, 0))
     }
 
@@ -2522,33 +2354,35 @@ export class App {
     this.ui.requestRender()
   }
 
-  private rebuildSystemPrompt(mcpServers?: McpServerState[]): void {
-    this.agent.updateMcpServers(mcpServers)
-  }
-
-  updateMcpState(mcpClient: McpClientManager): void {
-    this.mcpClient = mcpClient
-    if (this.agent.isBusy()) {
-      this.queuedMcpClient = mcpClient
-      this.showStatus('MCP runtime updates are queued until the active turn ends.')
+  private async handleRuntimeMcpCommand(args: string): Promise<void> {
+    if (args.trim()) {
+      this.showError('The /mcp command only lists MCP servers. Use /plugins to list or enable and disable plugins.')
       return
     }
-    this.applyMcpState(mcpClient)
-  }
-
-  private applyMcpState(mcpClient: McpClientManager): void {
-    this.agent.configureMcpTools(mcpClient)
-    this.rebuildSystemPrompt(mcpClient.getServerStates())
+    if (this.agent.isBusy()) {
+      this.showStatus('Wait for the active Agent turn to finish before refreshing MCP servers.')
+      return
+    }
+    if (!this.mcpPort) {
+      this.showError('MCP management is unavailable.')
+      return
+    }
+    let snapshot: TuiMcpSnapshot
+    try {
+      await this.pluginPort?.refresh()
+      snapshot = await this.mcpPort.refresh()
+    } catch (error) {
+      this.showError(`Could not refresh MCP servers: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.renderMcpSnapshot(snapshot)
   }
 
   private applyQueuedMcpState(): void {
-    if (this.agent.isBusy() || !this.queuedMcpClient) return
-    const client = this.queuedMcpClient
-    this.queuedMcpClient = undefined
-    this.applyMcpState(client)
+    this.mcpPort?.applyPending?.()
   }
 
-  showMcpReady(states: McpServerState[]): void {
+  showMcpReady(states: readonly Pick<TuiMcpServerState, 'name' | 'status'>[]): void {
     const connected = states.filter(s => s.status === 'connected')
     const failed = states.filter(s => s.status === 'failed')
 
@@ -2619,7 +2453,7 @@ export class App {
         this.chatContainer.removeChild(selectList)
 
         if (selectedMode) {
-          this.agent.setPermissionMode(selectedMode)
+          void Promise.resolve(this.agent.setPermissionMode(selectedMode)).catch((error) => this.showError(error instanceof Error ? error.message : String(error)))
           this.showStatus(`Permission mode set to: ${selectedMode}`)
         }
 
@@ -2644,12 +2478,12 @@ export class App {
       return
     }
 
-    this.agent.setPermissionMode(mode)
+    void Promise.resolve(this.agent.setPermissionMode(mode)).catch((error) => this.showError(error instanceof Error ? error.message : String(error)))
     this.showStatus(`Permission mode set to: ${mode}`)
   }
 
-  private static THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-  private static THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
+  private static THINKING_LEVELS: TuiThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  private static THINKING_DESCRIPTIONS: Record<TuiThinkingLevel, string> = {
     off: 'No reasoning',
     minimal: 'Very brief reasoning (~1k tokens)',
     low: 'Light reasoning (~2k tokens)',
@@ -2660,7 +2494,7 @@ export class App {
   }
 
   private handleThinkingCommand(args: string): void {
-    const level = args.trim().toLowerCase() as ThinkingLevel
+    const level = args.trim().toLowerCase() as TuiThinkingLevel
 
     if (!level) {
       const items: SelectItem[] = App.THINKING_LEVELS.map((l) => ({
@@ -2698,14 +2532,14 @@ export class App {
         return undefined
       })
 
-      const finish = (selectedLevel?: ThinkingLevel) => {
+      const finish = (selectedLevel?: TuiThinkingLevel) => {
         if (finished) return
         finished = true
         removeListener()
         this.chatContainer.removeChild(selectList)
 
         if (selectedLevel) {
-          this.agent.setThinkingLevel(selectedLevel)
+          void Promise.resolve(this.agent.setThinkingLevel(selectedLevel)).catch((error) => this.showError(error instanceof Error ? error.message : String(error)))
           this.footer.invalidate()
           this.showStatus(`Thinking level set to: ${selectedLevel}`)
         }
@@ -2716,7 +2550,7 @@ export class App {
       }
 
       selectList.onSelect = (item) => {
-        finish(item.value as ThinkingLevel)
+        finish(item.value as TuiThinkingLevel)
       }
 
       selectList.onCancel = () => {
@@ -2731,7 +2565,7 @@ export class App {
       return
     }
 
-    this.agent.setThinkingLevel(level)
+    void Promise.resolve(this.agent.setThinkingLevel(level)).catch((error) => this.showError(error instanceof Error ? error.message : String(error)))
     this.footer.invalidate()
     this.showStatus(`Thinking level set to: ${level}`)
   }
@@ -2772,7 +2606,7 @@ export class App {
   }
 
   private async handlePluginsCommand(): Promise<void> {
-    if (!this.pluginManager) {
+    if (!this.pluginPort) {
       this.showError('Plugin management is unavailable in this session.')
       return
     }
@@ -2785,11 +2619,11 @@ export class App {
     this.showPluginActionMenu()
   }
 
-  private async refreshPluginDiscovery(force = false, syncRuntime = true): Promise<PluginSnapshot | undefined> {
-    const manager = this.pluginManager
+  private async refreshPluginDiscovery(force = false, syncRuntime = true): Promise<TuiPluginSnapshot | undefined> {
+    const manager = this.pluginPort
     if (!manager) return undefined
 
-    let snapshot: PluginSnapshot
+    let snapshot: TuiPluginSnapshot
     if (this.pluginDiscoveryRefresh) {
       snapshot = await this.pluginDiscoveryRefresh
     } else if (force || Date.now() - this.pluginDiscoveryRefreshedAt >= 1000) {
@@ -2809,7 +2643,7 @@ export class App {
     if (syncRuntime && this.pluginRuntimeRefreshPending && !this.agent.isBusy()) {
       this.pluginRuntimeRefreshPending = false
       try {
-        await this.onPluginsChanged?.(snapshot)
+        await this.onPluginsChanged?.()
       } catch (error) {
         this.pluginRuntimeRefreshPending = true
         throw error
@@ -2831,8 +2665,8 @@ export class App {
   }
 
   private showPluginEnableDisableScopePicker(): void {
-    const plugins = this.pluginManager?.getPlugins() ?? []
-    const scopes: PluginScope[] = ['user', 'project']
+    const plugins = this.pluginPort?.getPlugins() ?? []
+    const scopes: TuiPluginScope[] = ['user', 'project']
     const available = scopes.filter((scope) => plugins.some((plugin) => plugin.scope === scope))
     if (available.length === 0) {
       this.showStatus('No plugin packages are available to enable or disable.')
@@ -2847,8 +2681,8 @@ export class App {
     })
   }
 
-  private showPluginEnableDisableMenu(scope: PluginScope): void {
-    const plugins = (this.pluginManager?.getPlugins() ?? []).filter((plugin) => plugin.scope === scope)
+  private showPluginEnableDisableMenu(scope: TuiPluginScope): void {
+    const plugins = (this.pluginPort?.getPlugins() ?? []).filter((plugin) => plugin.scope === scope)
     if (plugins.length === 0) {
       this.showStatus(`No ${scope} plugins are available.`)
       return
@@ -2888,19 +2722,19 @@ export class App {
     }
   }
 
-  private async applyPluginEnablement(scope: PluginScope, desiredStates: ReadonlyMap<string, boolean>): Promise<void> {
+  private async applyPluginEnablement(scope: TuiPluginScope, desiredStates: ReadonlyMap<string, boolean>): Promise<void> {
     if (this.agent.isBusy()) {
       this.showStatus('Plugin settings were not changed: finish or interrupt the active turn, then choose the action again.')
       return
     }
-    const changed = [...desiredStates].filter(([name, enabled]) => this.pluginManager?.findPlugin(name)?.enabled !== enabled)
+    const changed = [...desiredStates].filter(([name, enabled]) => this.pluginPort?.findPlugin(name)?.enabled !== enabled)
     if (changed.length === 0) {
       this.showStatus('Plugin settings are already up to date.')
       return
     }
     try {
-      const snapshot = await this.pluginManager?.setEnabledMany(scope, desiredStates)
-      await this.onPluginsChanged?.(snapshot)
+      const snapshot = await this.pluginPort?.setEnabledMany(scope, desiredStates)
+      if (snapshot) await this.onPluginsChanged?.()
       const enabled = changed.filter(([, state]) => state).length
       const disabled = changed.length - enabled
       this.showStatus(`Updated ${scope} plugins: ${enabled} enabled, ${disabled} disabled.`)
@@ -2916,9 +2750,9 @@ export class App {
       return
     }
 
-    let repository: GitRepository
+    let repository: TuiGitRepository
     try {
-      repository = await GitRepository.open(process.cwd())
+      repository = await this.gitPort.open()
     } catch (error) {
       this.showError(error instanceof Error ? error.message : String(error))
       return
@@ -2946,7 +2780,7 @@ export class App {
     await this.executeGitCommand(repository, command)
   }
 
-  private async showGitActionMenu(repository: GitRepository): Promise<void> {
+  private async showGitActionMenu(repository: TuiGitRepository): Promise<void> {
     try {
       const status = await repository.status()
       const actions: SelectItem[] = [
@@ -2981,7 +2815,7 @@ export class App {
     }
   }
 
-  private async executeGitCommand(repository: GitRepository, command: GitCommand): Promise<void> {
+  private async executeGitCommand(repository: TuiGitRepository, command: GitCommand): Promise<void> {
     if (this.gitOperationActive) {
       this.showStatus('A Git operation is already running. Wait for it to finish.')
       return
@@ -3132,7 +2966,7 @@ export class App {
   }
 
   private async runGitMutation(
-    repository: GitRepository,
+    repository: TuiGitRepository,
     operation: () => Promise<void | string>,
     success?: string,
   ): Promise<void> {
@@ -3152,7 +2986,7 @@ export class App {
     }
   }
 
-  private async gitMutationSucceeded(message: string, repository: GitRepository): Promise<void> {
+  private async gitMutationSucceeded(message: string, repository: TuiGitRepository): Promise<void> {
     this.footer.invalidate()
     try {
       const status = await repository.status()
@@ -3162,7 +2996,7 @@ export class App {
     }
   }
 
-  private showGitStatus(status: Awaited<ReturnType<GitRepository['status']>>): void {
+  private showGitStatus(status: TuiGitStatus): void {
     const lines = [
       `Repository: ${status.root}`,
       `Branch: ${status.branch}${status.upstream ? ` · ${status.upstream} · ${status.ahead} ahead / ${status.behind} behind` : ' · no upstream'}`,
@@ -3170,7 +3004,7 @@ export class App {
     const staged = status.changes.filter((change) => change.staged)
     const unstaged = status.changes.filter((change) => change.unstaged && !change.untracked)
     const untracked = status.changes.filter((change) => change.untracked)
-    const append = (label: string, changes: GitFileChange[]) => {
+    const append = (label: string, changes: readonly TuiGitFileChange[]) => {
       lines.push('', `${label} (${changes.length})`)
       if (changes.length === 0) lines.push('  none')
       for (const change of changes.slice(0, 100)) {
@@ -3184,7 +3018,7 @@ export class App {
     this.showGitOutput('Git status', lines.join('\n'))
   }
 
-  private async showGitBranches(repository: GitRepository, switchOnSelect = false): Promise<void> {
+  private async showGitBranches(repository: TuiGitRepository, switchOnSelect = false): Promise<void> {
     try {
       const branches = await repository.branches()
       if (branches.length === 0) {
@@ -3229,9 +3063,9 @@ export class App {
     }
   }
 
-  private async showGitPathPicker(repository: GitRepository, operation: 'stage' | 'unstage' | 'discard'): Promise<void> {
+  private async showGitPathPicker(repository: TuiGitRepository, operation: 'stage' | 'unstage' | 'discard'): Promise<void> {
     const status = await repository.status()
-    let candidates: GitFileChange[]
+    let candidates: TuiGitFileChange[]
     let title: string
     let subtitle: string
     let preSelected: number[] = []
@@ -3282,7 +3116,7 @@ export class App {
     })
   }
 
-  private async showGitStashes(repository: GitRepository, action?: 'apply' | 'pop'): Promise<void> {
+  private async showGitStashes(repository: TuiGitRepository, action?: 'apply' | 'pop'): Promise<void> {
     const stashes = await repository.stashList()
     if (stashes.length === 0) {
       this.showStatus('No saved stashes.')
@@ -3447,7 +3281,7 @@ export class App {
   }
 
   private showPluginList(): void {
-    const snapshot = this.pluginManager?.getSnapshot()
+    const snapshot = this.pluginPort?.getSnapshot()
     const plugins = snapshot?.plugins ?? []
     if (plugins.length === 0) {
       this.chatContainer.addChild(new Text(theme.dim('No plugins discovered.'), 1, 0))
@@ -3458,7 +3292,7 @@ export class App {
         const servers = plugin.servers.length
         const healthColor = plugin.health === 'ready' ? chalk.green : plugin.health === 'warning' ? chalk.yellow : chalk.red
         this.chatContainer.addChild(new Text(`${theme.bold(plugin.name)} ${theme.dim(`v${plugin.version}`)} · ${plugin.scope} · ${plugin.enabled ? chalk.green('enabled') : theme.dim('disabled')} · ${healthColor(plugin.health)}`, 1, 0))
-        this.chatContainer.addChild(new Text(`  ${theme.dim(`skills ${plugin.skills.length} · MCP servers ${servers}`)}`, 1, 0))
+        this.chatContainer.addChild(new Text(`  ${theme.dim(`skills ${plugin.skillCount} · MCP servers ${servers}`)}`, 1, 0))
       }
     }
     if (snapshot?.diagnostics.length) {
@@ -3548,7 +3382,7 @@ export class App {
     this.chatContainer.addChild(selectList)
     this.ui.setFocus(selectList)
     this.ui.requestRender()
-    selectList.onConfirm = (selected) => {
+    selectList.onConfirm = async (selected) => {
       this.chatContainer.removeChild(selectList)
       this.chatContainer.addChild(new Spacer(1))
       this.ui.setFocus(this.editor)
@@ -3566,10 +3400,10 @@ export class App {
         if (wasLoaded === shouldLoad) continue
         try {
           if (!shouldLoad) {
-            this.agent.unloadSkill(skill.name)
+            await this.agent.unloadSkill(skill.name)
             disabled++
           } else {
-            this.agent.loadSkill(skill.name)
+            await this.agent.loadSkill(skill.name)
             enabled++
           }
         } catch (error) {
@@ -3730,9 +3564,9 @@ export class App {
   private async prepareApprovalPresentation(
     toolName: string,
     input: Record<string, unknown>,
+    preview?: Record<string, unknown>,
   ): Promise<void> {
-    const prepare = getToolDefinition(toolName)?.presentation.prepareApproval
-    if (!prepare) return
+    if (!getToolUIConstructor(toolName)) return
     const serializedInput = JSON.stringify(input)
     const matchingCall = [...this.toolCallMetadata.entries()].reverse().find(([, call]) =>
       call.name === toolName && JSON.stringify(call.args) === serializedInput,
@@ -3743,15 +3577,8 @@ export class App {
     const component = this.pendingTools.get(toolCallId) ?? this.toolRows.get(toolCallId)
     if (!component?.updateDetails) return
 
-    try {
-      const details = await prepare(this.agent.getSnapshot().cwd, input)
-      if (details) dispatchToolLifecycle(component, { phase: 'presentation', details })
-    } catch (error) {
-      dispatchToolLifecycle(component, {
-        phase: 'presentation',
-        details: { phase: 'approval', previewNotice: `Preview unavailable: ${error instanceof Error ? error.message : 'unknown error'}` },
-      })
-    }
+    const details = preview ?? projectToolInput(toolName, this.agent.getSnapshot().cwd, input)
+    if (details) dispatchToolLifecycle(component, { phase: 'presentation', details })
     this.invalidateChatRender()
     this.ui.requestRender()
   }
@@ -3760,6 +3587,8 @@ export class App {
     toolName: string,
     input: Record<string, unknown>,
     description: string,
+    _requestId?: string,
+    preview?: Record<string, unknown>,
   ): Promise<boolean> {
     this.pauseToolElapsedTimer()
     this.hideWorking()
@@ -3774,7 +3603,7 @@ export class App {
       dispatchToolLifecycle(pendingComponent, { phase: 'awaiting-approval' })
       this.invalidateChatRender()
     }
-    await this.prepareApprovalPresentation(toolName, input)
+    await this.prepareApprovalPresentation(toolName, input, preview)
 
     return new Promise<boolean>((resolve) => {
 
@@ -3907,15 +3736,13 @@ export class App {
       '',
       `${theme.fg('accent', 'Environment Variables:')}`,
       '',
-      `  ANTHROPIC_API_KEY     Anthropic API key`,
-      `  ANTHROPIC_BASE_URL    Anthropic API base URL`,
-      `  ANTHROPIC_MODEL       Anthropic model ID`,
-      `  OPENAI_API_KEY        OpenAI API key`,
-      `  OPENAI_BASE_URL       OpenAI API base URL`,
+      `  OPENAI_API_KEY        OpenAI GPT API key`,
+      `  DEEPSEEK_API_KEY      DeepSeek API key`,
+      `  OPENAI_BASE_URL       OpenAI/DeepSeek API base URL`,
+      `  BASE_URL              Override the selected model base URL`,
       `  OPENAI_MODEL          OpenAI model ID`,
-      `  API_KEY               Fallback API key`,
-      `  BASE_URL              Fallback base URL`,
-      `  MODEL                 Fallback model ID`,
+      `  DEEPSEEK_MODEL        DeepSeek model ID`,
+      `  MODEL                 Override the selected model ID`,
     ]
 
     // Add available skills
@@ -3952,9 +3779,8 @@ export class App {
     this.ui.requestRender()
   }
 
-  getPendingImageContents(): ImageContent[] {
+  getPendingImageContents(): TuiImageInput[] {
     return this.pendingImages.map((img) => ({
-      type: 'image' as const,
       data: img.base64Data,
       mimeType: img.mimeType,
     }))
@@ -4050,7 +3876,7 @@ export class App {
   }
 
   private setupAgentSubscription(): void {
-    this.agent.subscribe((event: MicrocodeAgentEvent) => {
+    this.agent.subscribe((event: TuiAgentEvent) => {
       const process = () => {
         switch (event.type) {
         case 'compaction_changed':
@@ -4073,7 +3899,7 @@ export class App {
             this.streamingMessage = event.message
             this.appendTurnEntry(this.streamingComponent, 'assistant')
             this.setAgentActivity({ type: 'thinking' })
-            this.streamingComponent.updateContent(this.streamingMessage)
+            this.streamingComponent.updateContent(this.streamingMessage.content)
             this.invalidateChatRender()
             this.ui.requestRender()
           }
@@ -4082,7 +3908,7 @@ export class App {
         case 'message_update':
           if (this.streamingComponent && event.message.role === 'assistant') {
             this.streamingMessage = event.message
-            this.streamingComponent.updateContent(this.streamingMessage)
+            this.streamingComponent.updateContent(this.streamingMessage.content)
             this.invalidateChatRender()
             if (
               event.assistantMessageEvent.type === 'text_delta' &&
@@ -4107,7 +3933,7 @@ export class App {
         case 'message_end':
           if (event.message.role === 'assistant') {
             if (this.streamingComponent && this.streamingMessage) {
-              this.streamingComponent.updateContent(this.streamingMessage)
+              this.streamingComponent.updateContent(this.streamingMessage.content)
               this.invalidateChatRender()
               this.streamingComponent = undefined
               this.streamingMessage = undefined
@@ -4142,7 +3968,11 @@ export class App {
           if (component) {
             dispatchToolLifecycle(component, {
               phase: 'partial',
-              result: { ...event.partialResult, isError: false },
+              result: {
+                ...event.partialResult,
+                content: Array.isArray(event.partialResult.content) ? event.partialResult.content : [],
+                isError: false,
+              },
             })
             this.commitToolFrame()
           }
@@ -4158,7 +3988,11 @@ export class App {
             }
             dispatchToolLifecycle(component, {
               phase: event.isError ? 'failed' : 'completed',
-              result: { ...event.result, isError: event.isError },
+              result: {
+                ...event.result,
+                content: Array.isArray(event.result.content) ? event.result.content : [],
+                isError: event.isError,
+              },
             })
             this.updateContextUsage()
             this.footer.invalidate()
@@ -4177,16 +4011,16 @@ export class App {
         case 'turn_end':
           if (
             event.message.role === 'assistant' &&
-            (event.message.stopReason === 'aborted' || event.message.stopReason === 'error')
+            (event.message.stop_reason === 'aborted' || event.message.stop_reason === 'error')
           ) {
             this.clearPendingToolState()
             this.activeTurnTimeline?.setActivity(undefined)
             this.activityState = { phase: 'idle' }
-            const isInterrupted = event.message.stopReason === 'aborted'
+            const isInterrupted = event.message.stop_reason === 'aborted'
             this.appendTurnEntry(new Text(
               theme.fg('error', isInterrupted
                 ? 'Interrupted'
-                : `Error: ${event.message.errorMessage || 'Unknown error'}`),
+                : `Error: ${event.message.error_message || 'Unknown error'}`),
               1,
               0,
             ))
@@ -4199,7 +4033,7 @@ export class App {
           } else {
             this.setAgentActivity({ type: 'work-finished', pendingTools: 0 })
           }
-          if (event.message.role === 'assistant' && event.message.stopReason === 'stop') {
+          if (event.message.role === 'assistant' && event.message.stop_reason === 'stop') {
             this.finishTurn()
           }
           // Generate session title from first user message
@@ -4290,21 +4124,21 @@ export class App {
     this.activeTurnTimeline?.setActivity(undefined)
     this.workingFrameIndex = 0
   }
-  private updateStreamingToolCall(message: AgentMessage, forceRender: boolean): void {
+  private updateStreamingToolCall(message: RuntimeMessage, forceRender: boolean): void {
     if (message.role !== 'assistant') return
 
-    const toolCalls = message.content.filter((block) => block.type === 'toolCall')
+    const toolCalls = message.content.filter((block) => block.type === 'tool_call')
     for (const toolCall of toolCalls) {
       const args = toolCall.arguments ?? {}
-      this.toolCallMetadata.set(toolCall.id, { name: toolCall.name, args })
-      let component = this.pendingTools.get(toolCall.id) ?? this.toolRows.get(toolCall.id)
+      this.toolCallMetadata.set(toolCall.call_id, { name: toolCall.tool_id, args })
+      let component = this.pendingTools.get(toolCall.call_id) ?? this.toolRows.get(toolCall.call_id)
 
       if (!component) {
-        component = this.createToolRow(toolCall.id, toolCall.name, args)
+        component = this.createToolRow(toolCall.call_id, toolCall.tool_id, args)
         dispatchToolLifecycle(component, { phase: 'created', input: args })
         dispatchToolLifecycle(component, { phase: 'running' })
         this.appendTurnEntry(component, 'tool')
-        this.pendingTools.set(toolCall.id, component)
+        this.pendingTools.set(toolCall.call_id, component)
         // The tool is pending as soon as its call starts streaming. Waiting for
         // tool_execution_start creates a visible gap where Working disappears.
         this.setAgentActivity({ type: 'preparing-tool' })
@@ -4312,14 +4146,13 @@ export class App {
         dispatchToolLifecycle(component, { phase: 'input', input: args })
       }
 
-      const projectInput = getToolDefinition(toolCall.name)?.presentation.projectInput
-      const projected = projectInput?.(this.agent.getSnapshot().cwd, args)
+      const projected = projectToolInput(toolCall.tool_id, this.agent.getSnapshot().cwd, args)
       if (projected) dispatchToolLifecycle(component, { phase: 'presentation', details: projected })
 
       const now = performance.now()
-      const lastRenderAt = this.streamingToolLastRenderAt.get(toolCall.id) ?? 0
+      const lastRenderAt = this.streamingToolLastRenderAt.get(toolCall.call_id) ?? 0
       if (forceRender || now - lastRenderAt >= 100) {
-        this.streamingToolLastRenderAt.set(toolCall.id, now)
+        this.streamingToolLastRenderAt.set(toolCall.call_id, now)
         this.commitToolFrame()
       }
     }
@@ -4352,7 +4185,7 @@ export class App {
 
   private updateCompactionProgress(
     progress: Extract<
-      MicrocodeAgentEvent,
+      TuiAgentEvent,
       { type: 'compaction_changed' }
     >['progress'],
   ): void {
@@ -4462,6 +4295,10 @@ export class App {
   }
 
   stop(): void {
+    this.activeAuthController?.abort(new Error('TUI is closing.'))
+    this.activeAuthController = undefined
+    this.unsubscribeRuntimeConnection?.()
+    this.unsubscribeRuntimeConnection = undefined
     if (this.activeBashProcess) {
       this.cancelBashCommand()
     }

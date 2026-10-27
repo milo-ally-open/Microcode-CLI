@@ -1,32 +1,29 @@
 import {
-  Agent,
-  type AgentMessage,
-  type AgentTool,
-  type ThinkingLevel,
-} from '@earendil-works/pi-agent-core'
-import {
-  type Api,
-  type ImageContent,
-  type Message,
-  type Model,
-} from '@earendil-works/pi-ai'
-import { getModelConfig, getModels, resolveApiKey } from '../models/index.ts'
-import {
   getDeferredToolNames,
+  BASH_TOOL_NAME,
+  FILE_READ_TOOL_NAME,
+  FILE_WRITE_TOOL_NAME,
+  FILE_EDIT_TOOL_NAME,
+  VISION_TOOL_NAME,
   TOOL_SEARCH_TOOL_NAME,
+  TOOL_CONTROL_TOOL_NAME,
 } from '../tools/index.ts'
 import { getSystemPrompt } from '../prompt/prompts.ts'
 import { CompactionManager } from '../session/CompactionManager.ts'
 import type { ProjectInstructions } from '../instructions/projectInstructions.ts'
 import type { McpServerState } from '../mcp/types.ts'
 import type { McpClientManager } from '../mcp/client.ts'
+import type { KernelAgentEvent, KernelAgentPort } from '../kernel/contracts.ts'
+import type { ToolAdapter } from '../tools/contracts.ts'
+import type { RuntimeImageInput, RuntimeThinkingLevel } from '../runtime/contracts.ts'
+import type { RuntimeModelSource } from '../runtime/modelProjection.ts'
+import type { AgentRuntimeAdapter } from './contracts.ts'
 import { AgentTokenTracker, type AgentTokenSnapshot } from './AgentTokenTracker.ts'
 import {
   AgentModelManager,
-  resolveAgentModelConfig,
   type AgentModelSnapshot,
 } from './AgentModelManager.ts'
-import { AgentToolManager, type AgentToolSnapshot } from './AgentToolManager.ts'
+import { AgentToolManager, AgentToolSnapshotConflictError, type AgentToolSnapshot } from './AgentToolManager.ts'
 import { AgentSkillManager, type AgentSkillSnapshot } from './AgentSkillManager.ts'
 import {
   PermissionManager,
@@ -55,12 +52,25 @@ import type {
   AgentCompactionRecord,
   AgentSessionPersistence,
 } from './persistence.ts'
+import { resolve } from 'node:path'
+import { buildWorkspaceFileContext, listWorkspaceFiles } from '../utils/workspaceFileReferences.ts'
+import { buildSkillMentionContext } from '../skill/promptContext.ts'
 
 function createAgentId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `assistant-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-function normalizeIdentity(options: CreateMicrocodeAgentOptions): Readonly<AgentIdentity> {
+const COMPACTABLE_TOOL_NAMES = new Set([
+  BASH_TOOL_NAME,
+  FILE_READ_TOOL_NAME,
+  FILE_WRITE_TOOL_NAME,
+  FILE_EDIT_TOOL_NAME,
+  VISION_TOOL_NAME,
+])
+
+function normalizeIdentity<Message, Model extends RuntimeModelSource>(
+  options: CreateMicrocodeAgentOptions<Message, Model>,
+): Readonly<AgentIdentity> {
   return Object.freeze({
     id: options.identity?.id ?? createAgentId(),
     name: options.identity?.name,
@@ -74,28 +84,36 @@ function normalizeIdentity(options: CreateMicrocodeAgentOptions): Readonly<Agent
  * The underlying pi-agent-core Agent stays private. All runtime mutations and
  * lifecycle observations go through this instance boundary.
  */
-export class MicrocodeAgent {
-  private readonly core: Agent
+export class MicrocodeAgent<
+  Message = unknown,
+  Model extends RuntimeModelSource = RuntimeModelSource,
+> {
+  private readonly core: KernelAgentPort<Message, Model, ToolAdapter<any, any>, KernelAgentEvent<Message>, RuntimeThinkingLevel, RuntimeImageInput>
   private readonly identity: Readonly<AgentIdentity>
   private readonly cwd: string
-  private readonly compactionManager: CompactionManager
+  private readonly compactionManager: CompactionManager<Message>
   private readonly permissionManager: PermissionManager
   private readonly tokenTracker = new AgentTokenTracker()
-  private readonly modelManager: AgentModelManager
+  private readonly modelManager: AgentModelManager<Model>
   private readonly toolManager: AgentToolManager
   private readonly skillManager: AgentSkillManager
+  private readonly pluginPromptContext?: CreateMicrocodeAgentOptions['pluginPromptContext']
   private baseSystemPrompt: string
   private projectInstructions?: ProjectInstructions
   private mcpServers?: McpServerState[]
-  private persistence?: AgentSessionPersistence
-  private readonly listeners = new Set<MicrocodeAgentEventListener>()
+  private persistence?: AgentSessionPersistence<Message>
+  private readonly listeners = new Set<MicrocodeAgentEventListener<Message>>()
   private readonly eventController = new AbortController()
   private permissionRequestHandler?: AgentPermissionConfig['onPermissionRequest']
   private askUserQuestionHandler?: AgentPermissionConfig['onAskUserQuestion']
-  constructor(options: CreateMicrocodeAgentOptions = {}) {
+  constructor(
+    private readonly runtime: AgentRuntimeAdapter<Message, Model>,
+    options: CreateMicrocodeAgentOptions<Message, Model> = {},
+  ) {
     this.cwd = options.cwd ?? process.cwd()
     this.projectInstructions = options.projectInstructions
     this.persistence = options.persistence
+    this.pluginPromptContext = options.pluginPromptContext
     this.identity = normalizeIdentity(options)
     this.permissionRequestHandler = options.permission?.onPermissionRequest
     this.askUserQuestionHandler = options.permission?.onAskUserQuestion
@@ -113,17 +131,19 @@ export class MicrocodeAgent {
         : undefined,
     })
 
-    const resolveModelConfig = options.resolveModelConfig ?? resolveAgentModelConfig
+    const resolveModelConfig = options.resolveModelConfig
+      ?? ((modelId: string, api?: string, provider?: string) =>
+        this.runtime.resolveModelConfig(modelId, api, provider))
     const modelConfig = options.initialModelConfig
       ?? (options.modelId
-        ? resolveModelConfig(options.modelId, options.api as Api | undefined)
-        : getModelConfig())
+        ? resolveModelConfig(options.modelId, options.api)
+        : this.runtime.getDefaultModelConfig())
     this.modelManager = new AgentModelManager({
       model: modelConfig.model,
       apiKey: modelConfig.apiKey,
       thinkingLevel: options.thinkingLevel,
       resolveModelConfig,
-      resolveApiKey: options.resolveModelApiKey,
+      resolveApiKey: options.resolveModelApiKey ?? this.runtime.resolveApiKey,
     })
     this.mcpServers = options.mcpServers ? [...options.mcpServers] : undefined
     this.skillManager = new AgentSkillManager({
@@ -136,14 +156,14 @@ export class MicrocodeAgent {
     this.toolManager = new AgentToolManager({
       cwd: this.cwd,
       getSkills: () => this.skillManager.getSkills(),
-      model: modelConfig.model,
+      modelSupportsImages: this.runtime.supportsImages(modelConfig.model),
       getPersistence: () => this.persistence,
     })
 
     const deferredToolNames = getDeferredToolNames()
     const systemPrompt = getSystemPrompt({
       cwd: this.cwd,
-      modelId: `${modelConfig.model.provider}/${modelConfig.model.id}`,
+      modelId: this.runtime.modelPromptIdentity(modelConfig.model),
       mcpServers: this.mcpServers,
       skills: [...this.skillManager.getSkills()],
       deferredToolNames: deferredToolNames.length > 0 ? deferredToolNames : undefined,
@@ -151,9 +171,13 @@ export class MicrocodeAgent {
     }).join('\n\n')
 
     this.baseSystemPrompt = systemPrompt
-    this.compactionManager = new CompactionManager({
-      model: modelConfig.model,
-      apiKey: modelConfig.apiKey,
+    this.compactionManager = new CompactionManager<Message>({
+      contextWindow: modelConfig.model.contextWindow,
+      messageAdapter: this.runtime.getCompactionMessageAdapter(),
+      compactableToolNames: COMPACTABLE_TOOL_NAMES,
+      summarize: options.summarize ?? this.runtime.createCompactionSummarizer(
+        () => this.modelManager.getModel(),
+      ),
       onProgress: (progress) => {
         options.onCompactionProgress?.(progress)
         this.emitDetached({
@@ -162,49 +186,34 @@ export class MicrocodeAgent {
           progress: Object.freeze({ ...progress }),
         })
       },
-      generateSummaryFn: options.generateSummaryFn,
-      models: options.models ?? getModels(),
       settings: options.compactionSettings,
     })
     this.compactionManager.setSystemPrompt(this.baseSystemPrompt)
 
-    this.core = new Agent({
-      initialState: {
-        systemPrompt: this.baseSystemPrompt,
-        model: modelConfig.model,
-        tools: this.toolManager.getTools(),
-      },
-      beforeToolCall: async (context) =>
-        this.permissionManager.checkPermissionWithPrompt(context),
-      afterToolCall: async (context) => {
-        if (context.toolCall.name !== TOOL_SEARCH_TOOL_NAME) {
-          return undefined
-        }
-        const discoveredTools = this.toolManager.commitPendingDiscoveredTools()
-        if (discoveredTools.length === 0) return undefined
-        const tools = this.toolManager.getTools()
-        this.core.state.tools = tools
-        context.context.tools = tools
-        return undefined
-      },
-      streamFn: options.streamFn ?? ((model, context, streamOptions) =>
-        (options.models ?? getModels()).streamSimple(model, context, streamOptions)),
-      convertToLlm: createConvertToLlm(() => this.core.state.model),
+    this.core = this.runtime.createKernel({
+      systemPrompt: this.baseSystemPrompt,
+      model: modelConfig.model,
+      getCurrentModel: () => this.modelManager.getModel(),
+      tools: this.getActiveTools(),
       // prepareRequest can replace the loop's current context. transformContext
       // only projects a one-request copy, so compaction there leaves subsequent
       // tool/model turns running on the original oversized transcript.
-      prepareRequest: async ({ context }) => ({
-        context: {
-          ...context,
-          messages: await this.prepareModelContext(context.messages),
-        },
-      }),
+      prepareRequest: (messages) => this.prepareModelContext(messages),
+    }, {
+      beforeToolCall: (request) => this.permissionManager.checkPermissionWithPrompt(request),
+      afterToolCall: ({ toolName, setTools }) => {
+        if (toolName !== TOOL_SEARCH_TOOL_NAME && toolName !== TOOL_CONTROL_TOOL_NAME) return
+        const changes = this.toolManager.commitPendingChanges()
+        if (!changes.changed) return
+        setTools(this.getActiveTools())
+        this.emitStateChangedDetached('tools_changed')
+      },
     })
 
     if (options.thinkingLevel) {
-      this.core.state.thinkingLevel = options.thinkingLevel
+      this.core.setThinkingLevel(options.thinkingLevel)
     }
-    this.modelManager.setThinkingLevel(this.core.state.thinkingLevel)
+    this.modelManager.setThinkingLevel(this.core.getSnapshot().thinkingLevel)
 
     this.permissionManager.setGetTool((name: string) =>
       this.toolManager.findTool(name),
@@ -255,12 +264,13 @@ export class MicrocodeAgent {
   }
 
   getSnapshot(): Readonly<MicrocodeAgentSnapshot> {
-    const state = this.core.state
+    const state = this.core.getSnapshot()
+    const modelConfig = this.modelManager.getSnapshot()
     return Object.freeze({
       identity: this.identity,
       cwd: this.cwd,
-      model: Object.freeze({ ...state.model }),
-      modelConfig: this.modelManager.getSnapshot(),
+      model: modelConfig.model,
+      modelConfig,
       thinkingLevel: state.thinkingLevel,
       systemPrompt: state.systemPrompt,
       messageCount: state.messages.length,
@@ -276,27 +286,28 @@ export class MicrocodeAgent {
     })
   }
 
-  getMessages(): readonly AgentMessage[] {
-    return [...this.core.state.messages]
+  getMessages(): readonly Message[] {
+    return this.core.getMessages()
   }
 
   isBusy(): boolean {
-    return this.core.state.isStreaming || this.core.state.pendingToolCalls.size > 0
+    const snapshot = this.core.getSnapshot()
+    return snapshot.isStreaming || snapshot.pendingToolCalls.size > 0
   }
 
-  getCurrentModel(): Readonly<Model<Api>> {
-    return this.modelManager.getSnapshot().model
+  getCurrentModel(): Readonly<Model> {
+    return Object.freeze({ ...this.modelManager.getModel() })
   }
 
-  getThinkingLevel(): ThinkingLevel {
+  getThinkingLevel(): RuntimeThinkingLevel {
     return this.modelManager.getThinkingLevel()
   }
 
   replaceMessages(
-    messages: readonly AgentMessage[],
+    messages: readonly Message[],
     usageMode: MessageUsageResetMode = 'rebuild',
   ): void {
-    this.core.state.messages = [...messages]
+    this.core.setMessages(messages)
     if (usageMode === 'rebuild') {
       this.tokenTracker.rebuild(messages)
     } else {
@@ -306,29 +317,30 @@ export class MicrocodeAgent {
   }
 
   clearMessages(): void {
-    this.core.state.messages = []
+    this.core.setMessages([])
     this.tokenTracker.reset()
     this.emitTokenAndState('messages_cleared')
   }
 
   getTokenStats(): Readonly<AgentTokenSnapshot> {
+    const state = this.core.getSnapshot()
     return this.tokenTracker.getSnapshot({
-      systemPrompt: this.core.state.systemPrompt,
-      messages: this.core.state.messages,
-      model: this.core.state.model,
+      systemPrompt: state.systemPrompt,
+      messages: state.messages.map((message) => this.runtime.toTokenEstimatorMessage(message)),
+      model: state.model,
     })
   }
 
-  prompt(message: AgentMessage | AgentMessage[]): Promise<void>
-  prompt(input: string, images?: ImageContent[]): Promise<void>
+  prompt(message: Message | Message[]): Promise<void>
+  prompt(input: string, images?: RuntimeImageInput[]): Promise<void>
   async prompt(
-    input: string | AgentMessage | AgentMessage[],
-    images?: ImageContent[],
+    input: string | Message | Message[],
+    images?: RuntimeImageInput[],
   ): Promise<void> {
     this.refreshSkillCatalog()
     if (!this.isBusy()) await this.compactIfNeeded()
     if (typeof input === 'string') {
-      await this.core.prompt(input, images)
+      await this.core.prompt(await this.preparePromptContext(input), images)
     } else {
       await this.core.prompt(input)
     }
@@ -338,15 +350,16 @@ export class MicrocodeAgent {
   async promptReadOnly(input: string): Promise<void> {
     if (this.isBusy()) throw new Error('Cannot change the available tools while the agent is busy.')
 
+    this.refreshSkillCatalog()
     await this.compactIfNeeded()
     this.toolManager.setPromptReadOnly(true)
-    this.core.state.tools = this.toolManager.getTools()
+    this.core.setTools(this.getActiveTools())
     this.emitStateChangedDetached('tools_changed')
     try {
-      await this.core.prompt(input)
+      await this.core.prompt(await this.preparePromptContext(input))
     } finally {
       this.toolManager.setPromptReadOnly(false)
-      this.core.state.tools = this.toolManager.getTools()
+      this.core.setTools(this.getActiveTools())
       this.emitStateChangedDetached('tools_changed')
     }
     await this.compactAfterPrompt()
@@ -356,11 +369,11 @@ export class MicrocodeAgent {
     this.core.abort()
   }
 
-  followUp(message: AgentMessage): void {
+  followUp(message: Message): void {
     this.core.followUp(message)
   }
 
-  steer(message: AgentMessage): void {
+  steer(message: Message): void {
     this.core.steer(message)
   }
 
@@ -368,16 +381,16 @@ export class MicrocodeAgent {
     return this.core.waitForIdle()
   }
 
-  subscribe(listener: MicrocodeAgentEventListener): () => void {
+  subscribe(listener: MicrocodeAgentEventListener<Message>): () => void {
     this.listeners.add(listener)
     return () => {
       this.listeners.delete(listener)
     }
   }
 
-  setThinkingLevel(level: ThinkingLevel): void {
+  setThinkingLevel(level: RuntimeThinkingLevel): void {
     this.modelManager.setThinkingLevel(level)
-    this.core.state.thinkingLevel = level
+    this.core.setThinkingLevel(level)
     this.emitStateChangedDetached('thinking_changed')
   }
 
@@ -389,9 +402,13 @@ export class MicrocodeAgent {
     return this.modelManager.getApiKey()
   }
 
-  switchModel(modelId: string, api?: Api, provider?: string): Readonly<AgentModelSnapshot> {
+  async suggestSessionTitle(openingSentence: string): Promise<string> {
+    return this.runtime.generateTitle(this.modelManager.getModel(), openingSentence)
+  }
+
+  switchModel(modelId: string, api?: string, provider?: string): Readonly<AgentModelSnapshot> {
     const nextConfig = this.modelManager.resolve(modelId, api, provider)
-    const nextCoreTools = this.toolManager.previewCoreTools(nextConfig.model)
+    const nextCoreTools = this.toolManager.previewCoreTools(this.runtime.supportsImages(nextConfig.model))
     const nextBasePrompt = this.buildBaseSystemPrompt(nextConfig.model)
     const nextPrompt = this.appendLoadedSkills(nextBasePrompt)
 
@@ -399,39 +416,38 @@ export class MicrocodeAgent {
       model: this.modelManager.getModel(),
       apiKey: this.modelManager.getApiKey(),
     }
-    const previousModel = this.core.state.model
+    const previousState = this.core.getSnapshot()
+    const previousModel = previousState.model
     const previousCoreTools = this.toolManager.getCoreTools()
-    const previousPrompt = this.core.state.systemPrompt
+    const previousPrompt = previousState.systemPrompt
     const previousBasePrompt = this.baseSystemPrompt
 
     try {
       this.modelManager.commit(nextConfig)
-      this.core.state.model = nextConfig.model
+      this.core.setModel(nextConfig.model)
       this.toolManager.replaceCoreTools(nextCoreTools)
-      this.core.state.tools = this.toolManager.getTools()
+      this.core.setTools(this.getActiveTools())
       this.baseSystemPrompt = nextBasePrompt
       this.updateSystemPrompt(nextPrompt)
-      this.compactionManager.setModel(nextConfig.model)
-      this.compactionManager.setApiKey(nextConfig.apiKey)
+      this.compactionManager.setContextWindow(nextConfig.model.contextWindow)
       this.compactionManager.setSystemPrompt(nextPrompt)
       const snapshot = this.modelManager.getSnapshot()
       this.emitDetached({
         type: 'model_changed',
         agentId: this.identity.id,
-        previous: Object.freeze({ ...previousModel }),
-        current: Object.freeze({ ...snapshot.model }),
+        previous: this.runtime.describeModel(previousModel),
+        current: snapshot.model,
       })
       this.emitTokenAndState('model_changed')
       return snapshot
     } catch (error) {
       this.modelManager.commit(previousConfig)
-      this.core.state.model = previousModel
+      this.core.setModel(previousModel)
       this.toolManager.replaceCoreTools(previousCoreTools)
-      this.core.state.tools = this.toolManager.getTools()
+      this.core.setTools(this.getActiveTools())
       this.baseSystemPrompt = previousBasePrompt
       this.updateSystemPrompt(previousPrompt)
-      this.compactionManager.setModel(previousModel)
-      this.compactionManager.setApiKey(previousConfig.apiKey)
+      this.compactionManager.setContextWindow(previousModel.contextWindow)
       this.compactionManager.setSystemPrompt(previousPrompt)
       throw error
     }
@@ -439,7 +455,7 @@ export class MicrocodeAgent {
 
   updateMcpServers(servers?: McpServerState[]): void {
     this.mcpServers = servers ? [...servers] : undefined
-    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.state.model)
+    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.getSnapshot().model)
     const prompt = this.appendLoadedSkills(this.baseSystemPrompt)
     this.updateSystemPrompt(prompt)
     this.compactionManager.setSystemPrompt(prompt)
@@ -513,7 +529,7 @@ export class MicrocodeAgent {
   }
 
   setPermissionRequestHandler(
-    handler: Parameters<PermissionManager['setOnPermissionRequest']>[0],
+    handler: AgentPermissionConfig['onPermissionRequest'],
   ): void {
     this.permissionRequestHandler = handler
     this.permissionManager.setOnPermissionRequest((toolName, input, description) =>
@@ -522,7 +538,7 @@ export class MicrocodeAgent {
   }
 
   setAskUserQuestionHandler(
-    handler: Parameters<PermissionManager['setOnAskUserQuestion']>[0],
+    handler: AgentPermissionConfig['onAskUserQuestion'],
   ): void {
     this.askUserQuestionHandler = handler
     this.permissionManager.setOnAskUserQuestion((toolName, input) =>
@@ -530,19 +546,19 @@ export class MicrocodeAgent {
     )
   }
 
-  setPersistence(persistence?: AgentSessionPersistence): void {
+  setPersistence(persistence?: AgentSessionPersistence<Message>): void {
     this.persistence = persistence
   }
 
   async persistMessages(): Promise<void> {
-    await this.persistence?.saveMessages(this.core.state.messages)
+    await this.persistence?.saveMessages(this.core.getMessages())
   }
 
-  async compact(options: CompactAgentOptions = {}): Promise<Readonly<AgentCompactionResult>> {
-    if (this.core.state.isStreaming) {
+  async compact(options: CompactAgentOptions = {}): Promise<Readonly<AgentCompactionResult<Message>>> {
+    if (this.core.getSnapshot().isStreaming) {
       throw new Error('Cannot manually compact while the agent is running.')
     }
-    const messages = [...this.core.state.messages]
+    const messages = [...this.core.getMessages()]
     if (messages.length === 0) {
       throw new Error('No messages to compact.')
     }
@@ -559,8 +575,8 @@ export class MicrocodeAgent {
   }
 
   async compactIfNeeded(
-    messages: readonly AgentMessage[] = this.core.state.messages,
-  ): Promise<AgentMessage[]> {
+    messages: readonly Message[] = this.core.getMessages(),
+  ): Promise<Message[]> {
     const originalUsage = this.compactionManager.getContextUsage([...messages])
     const contextWindowExceeded = originalUsage.tokens > originalUsage.contextWindow
     const { messages: microcompacted } = this.compactionManager.microcompact([...messages])
@@ -587,32 +603,46 @@ export class MicrocodeAgent {
   private async compactAfterPrompt(): Promise<void> {
     // A failed pre-request compaction already ended the core run with a visible error.
     // Do not immediately retry the same failing summary request after that run settles.
-    if (this.core.state.errorMessage?.startsWith('Automatic context compaction failed:')) return
+    if (this.core.getSnapshot().errorMessage?.startsWith('Automatic context compaction failed:')) return
     await this.compactIfNeeded()
   }
 
+  private async addMentionedFileContext(input: string): Promise<string> {
+    if (!input.includes('@')) return input
+    const indexedFiles = new Set(await listWorkspaceFiles(this.cwd))
+    return buildWorkspaceFileContext(this.cwd, input, indexedFiles, async (path) => {
+      const decision = await this.permissionManager.checkPermissionWithPrompt({
+        toolName: FILE_READ_TOOL_NAME,
+        input: { file_path: resolve(this.cwd, path) },
+      })
+      return decision === undefined
+    })
+  }
+
+  private async preparePromptContext(input: string): Promise<string> {
+    const scanText = input
+    const skillContext = buildSkillMentionContext(
+      input,
+      this.skillManager.getSkills().filter((skill) => !this.skillManager.isLoaded(skill.name)),
+      scanText,
+    )
+    const pluginContext = this.pluginPromptContext?.(skillContext, scanText) ?? skillContext
+    return this.addMentionedFileContext(pluginContext)
+  }
+
   private async prepareModelContext(
-    messages: readonly AgentMessage[],
-  ): Promise<AgentMessage[]> {
+    messages: readonly Message[],
+  ): Promise<Message[]> {
     // The prepared context is carried into the next request by the Agent loop.
     // Replace, rather than accumulate, the transient reminder each time.
     const withoutPreviousReminder = messages.filter((message) =>
-      !(message.role === 'custom' && message.customType === 'task-reminder'),
+      !this.runtime.isTaskReminderMessage(message),
     )
     const compacted = await this.compactIfNeeded(withoutPreviousReminder)
     const reminder = await this.getTaskReminder()
     if (!reminder) return compacted
 
-    return [
-      ...compacted,
-      {
-        role: 'custom',
-        customType: 'task-reminder',
-        content: reminder,
-        display: false,
-        timestamp: Date.now(),
-      },
-    ]
+    return [...compacted, this.runtime.createTaskReminderMessage(reminder)]
   }
 
   private async getTaskReminder(): Promise<string | undefined> {
@@ -659,7 +689,7 @@ export class MicrocodeAgent {
 
   setPluginSkills(skills: readonly import('../skill.ts').Skill[], diagnostics: readonly string[] = []): void {
     if (!this.skillManager.setPluginSkills(skills, diagnostics)) return
-    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.state.model)
+    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.getSnapshot().model)
     this.rebuildSystemPrompt()
     this.emitStateChangedDetached('skills_changed')
   }
@@ -668,26 +698,45 @@ export class MicrocodeAgent {
     return this.toolManager.getSnapshot()
   }
 
-  addTools(tools: readonly AgentTool<any, any>[]): void {
-    this.toolManager.addTools(tools)
-    this.core.state.tools = this.toolManager.getTools()
+  addTools(
+    tools: readonly ToolAdapter<any, any>[],
+    options: { enabled?: boolean; mutable?: boolean; version?: number } = {},
+  ): void {
+    this.assertToolSetMutable()
+    this.toolManager.addTools(tools, options)
+    this.core.setTools(this.getActiveTools())
     this.emitStateChangedDetached('tools_changed')
   }
 
   configureMcpTools(client: McpClientManager): void {
+    this.assertToolSetMutable()
     this.toolManager.configureMcpTools(client)
-    this.core.state.tools = this.toolManager.getTools()
+    this.core.setTools(this.getActiveTools())
     this.emitStateChangedDetached('tools_changed')
   }
 
   removeTools(names: readonly string[]): void {
+    this.assertToolSetMutable()
     this.toolManager.removeTools(names)
-    this.core.state.tools = this.toolManager.getTools()
+    this.core.setTools(this.getActiveTools())
     this.emitStateChangedDetached('tools_changed')
   }
 
   hasTool(name: string): boolean {
     return this.toolManager.findTool(name) !== undefined
+  }
+
+  async setToolEnabled(name: string, enabled: boolean, expectedVersion: number): Promise<void> {
+    await this.core.waitForIdle()
+    const actualVersion = this.toolManager.getSnapshot().version
+    if (expectedVersion !== actualVersion) {
+      throw new AgentToolSnapshotConflictError(expectedVersion, actualVersion)
+    }
+    this.toolManager.requestToolChange(name, enabled)
+    const changes = this.toolManager.commitPendingChanges()
+    if (!changes.changed) return
+    this.core.setTools(this.getActiveTools())
+    this.emitStateChangedDetached('tools_changed')
   }
 
   private rebuildSystemPrompt(): void {
@@ -696,25 +745,30 @@ export class MicrocodeAgent {
     this.compactionManager.setSystemPrompt(prompt)
   }
 
+  private getActiveTools(): ToolAdapter<any, any>[] {
+    return this.toolManager.getTools()
+  }
+
+  private assertToolSetMutable(): void {
+    if (this.isBusy()) {
+      throw new Error('Cannot change the available tools while the agent is busy.')
+    }
+  }
+
   private refreshSkillCatalog(): void {
     if (!this.skillManager.refresh()) return
-    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.state.model)
+    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.getSnapshot().model)
     this.rebuildSystemPrompt()
     this.emitStateChangedDetached('skills_changed')
   }
 
   private updateSystemPrompt(prompt: string): void {
-    const messages = [...this.core.state.messages]
-    const systemIndex = messages.findIndex((message) => message.role === 'system')
-    const systemMessage = { role: 'system' as const, content: prompt, timestamp: Date.now() }
-    if (systemIndex >= 0) messages[systemIndex] = systemMessage
-    else messages.unshift(systemMessage)
-    this.core.state.messages = messages
+    this.core.setMessages(this.runtime.applySystemPrompt(this.core.getMessages(), prompt))
   }
 
   updateProjectInstructions(instructions: ProjectInstructions): void {
     this.projectInstructions = instructions
-    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.state.model)
+    this.baseSystemPrompt = this.buildBaseSystemPrompt(this.core.getSnapshot().model)
     this.rebuildSystemPrompt()
     this.emitTokenAndState('system_prompt_changed')
   }
@@ -723,11 +777,11 @@ export class MicrocodeAgent {
     return this.projectInstructions
   }
 
-  private buildBaseSystemPrompt(model: Model<Api>): string {
+  private buildBaseSystemPrompt(model: Model): string {
     const deferredToolNames = getDeferredToolNames()
     const prompt = getSystemPrompt({
       cwd: this.cwd,
-      modelId: `${model.provider}/${model.id}`,
+      modelId: this.runtime.modelPromptIdentity(model),
       mcpServers: this.mcpServers,
       skills: [...this.skillManager.getSkills()],
       deferredToolNames: deferredToolNames.length > 0 ? deferredToolNames : undefined,
@@ -743,7 +797,7 @@ export class MicrocodeAgent {
   private async commitCompaction(
     result: {
       summary: string
-      messages: AgentMessage[]
+      messages: Message[]
       tokensBefore: number
       tokensAfter: number
       keptMessageCount: number
@@ -760,8 +814,8 @@ export class MicrocodeAgent {
           tokensBefore: result.tokensBefore,
           tokensAfter: result.tokensAfter,
         })
-        await this.persistence.saveMessages(this.core.state.messages)
-        const record: AgentCompactionRecord = {
+        await this.persistence.saveMessages(this.core.getMessages())
+        const record: AgentCompactionRecord<Message> = {
           summary: result.summary,
           messages: result.messages,
           tokensBefore: result.tokensBefore,
@@ -770,9 +824,9 @@ export class MicrocodeAgent {
           compactedMessageCount: result.messages.length,
           automatic: result.automatic,
           model: {
-            provider: String(this.core.state.model.provider),
-            modelId: this.core.state.model.id,
-            contextWindow: this.core.state.model.contextWindow,
+            provider: String(this.core.getSnapshot().model.provider),
+            modelId: this.core.getSnapshot().model.id,
+            contextWindow: this.core.getSnapshot().model.contextWindow,
           },
         }
         await this.persistence.recordCompaction(record)
@@ -811,14 +865,22 @@ export class MicrocodeAgent {
     input: Record<string, unknown>,
     description: string,
   ): Promise<boolean> {
-    const request = this.createPermissionRequest(kind, toolName, input, description)
+    let preview: Record<string, unknown> | undefined
+    try {
+      preview = await this.toolManager.getApprovalPreview(toolName, input)
+    } catch (error) {
+      preview = {
+        previewNotice: `Preview unavailable: ${error instanceof Error ? error.message : 'unknown error'}`,
+      }
+    }
+    const request = this.createPermissionRequest(kind, toolName, input, description, preview)
     await this.emit({
       type: 'permission_requested',
       agentId: this.identity.id,
       request,
     })
     const allowed = this.permissionRequestHandler
-      ? await this.permissionRequestHandler(toolName, input, description)
+      ? await this.permissionRequestHandler(toolName, input, description, request.requestId, preview)
       : false
     await this.emit({
       type: 'permission_resolved',
@@ -840,7 +902,7 @@ export class MicrocodeAgent {
       request,
     })
     const result = this.askUserQuestionHandler
-      ? await this.askUserQuestionHandler(toolName, input)
+      ? await this.askUserQuestionHandler(toolName, input, request.requestId)
       : { block: true }
     await this.emit({
       type: 'permission_resolved',
@@ -856,17 +918,20 @@ export class MicrocodeAgent {
     toolName: string,
     input: Record<string, unknown>,
     description?: string,
+    preview?: Record<string, unknown>,
   ): Readonly<AgentPermissionRequest> {
     return Object.freeze({
+      requestId: globalThis.crypto.randomUUID(),
       kind,
       toolName,
       input: Object.freeze({ ...input }),
       description,
+      ...(preview ? { preview: Object.freeze({ ...preview }) } : {}),
     })
   }
 
   private async emit(
-    event: MicrocodeAgentEvent,
+    event: MicrocodeAgentEvent<Message>,
     signal: AbortSignal = this.eventController.signal,
   ): Promise<void> {
     for (const listener of [...this.listeners]) {
@@ -874,7 +939,7 @@ export class MicrocodeAgent {
     }
   }
 
-  private emitDetached(event: MicrocodeAgentEvent): void {
+  private emitDetached(event: MicrocodeAgentEvent<Message>): void {
     void this.emit(event).catch(() => {})
   }
 
@@ -916,78 +981,5 @@ export class MicrocodeAgent {
       usage: this.getTokenStats(),
     })
     this.emitStateChangedDetached(reason)
-  }
-}
-
-export function createConvertToLlm(getModel: () => Model<Api>) {
-  return (messages: AgentMessage[]): Message[] => {
-    const model = getModel()
-    const compat = model.compat as any
-    const requiresReasoningContent =
-      compat?.requiresReasoningContentOnAssistantMessages && model.reasoning
-
-    return messages.flatMap((message) => {
-      switch (message.role) {
-        case 'system':
-          // pi-agent-core stores the active system prompt and tool loadout
-          // changes in system messages. Dropping them makes models appear
-          // tool-less even though the tools are registered in Agent.state.
-          return [message as Message]
-
-        case 'user':
-        case 'toolResult':
-          return [message as Message]
-
-        case 'assistant': {
-          if (model.api === 'openai-completions') {
-            const thinkingText = message.content
-              .filter((content: any) => content.type === 'thinking')
-              .map((content: any) => content.thinking)
-              .join('\n')
-            const filtered = message.content.filter((content: any) => content.type !== 'thinking')
-            const result: any = { ...message, content: filtered }
-            if (requiresReasoningContent) {
-              result.reasoning_content = thinkingText || ''
-            }
-            return [result as Message]
-          }
-          return [message as Message]
-        }
-
-        case 'bashExecution':
-          return [{
-            role: 'user' as const,
-            content: `Command: ${message.command}\nOutput: ${message.output}`,
-            timestamp: message.timestamp,
-          }] as Message[]
-
-        case 'compactionSummary':
-          return [{
-            role: 'user' as const,
-            content: `[Previous conversation summary]\n${message.summary}`,
-            timestamp: message.timestamp,
-          }] as Message[]
-
-        case 'branchSummary':
-          return [{
-            role: 'user' as const,
-            content: `[Branch summary]\n${message.summary}`,
-            timestamp: message.timestamp,
-          }] as Message[]
-
-        case 'custom':
-          if (typeof message.content === 'string') {
-            return [{
-              role: 'user' as const,
-              content: message.content,
-              timestamp: message.timestamp,
-            }] as Message[]
-          }
-          return []
-
-        default:
-          return []
-      }
-    })
   }
 }

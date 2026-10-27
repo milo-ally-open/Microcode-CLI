@@ -1,13 +1,12 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type {
   TaskList,
   TaskMarkUpdate,
   TaskReminderUpdate,
 } from '../tasks/TaskSystem.ts'
 
-export interface AgentCompactionRecord {
+export interface AgentCompactionRecord<Message> {
   summary: string
-  messages: AgentMessage[]
+  messages: Message[]
   tokensBefore: number
   tokensAfter: number
   keptMessageCount: number
@@ -20,9 +19,9 @@ export interface AgentCompactionRecord {
   }
 }
 
-export interface AgentSessionPersistence {
-  saveMessages(messages: readonly AgentMessage[]): Promise<void>
-  recordCompaction(record: AgentCompactionRecord): Promise<void>
+export interface AgentSessionPersistence<Message> {
+  saveMessages(messages: readonly Message[]): Promise<void>
+  recordCompaction(record: AgentCompactionRecord<Message>): Promise<void>
   getSessionId?(): string | null
   createTaskList?(title: string, tasks: readonly string[]): Promise<TaskList>
   listTaskLists?(): Promise<TaskList[]>

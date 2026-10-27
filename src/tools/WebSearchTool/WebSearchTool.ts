@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { Type, type Static } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 
@@ -163,7 +163,7 @@ function formatResults(query: string, results: readonly WebSearchResult[]): stri
   return lines.join('\n')
 }
 
-export function createWebSearchTool(): AgentTool<typeof webSearchSchema, WebSearchToolDetails> {
+export function createWebSearchTool(): ToolAdapter<typeof webSearchSchema, WebSearchToolDetails> {
   return {
     name: TOOL_NAME,
     label: 'WebSearch',
@@ -174,8 +174,8 @@ export function createWebSearchTool(): AgentTool<typeof webSearchSchema, WebSear
       _toolCallId: string,
       params: WebSearchToolInput,
       signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<WebSearchToolDetails>) => void,
-    ): Promise<AgentToolResult<WebSearchToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<WebSearchToolDetails>) => void,
+    ): Promise<ToolExecutionResult<WebSearchToolDetails>> {
       const query = params.query.trim()
       if (!query) throw new Error('Missing search query.')
       if (params.allowed_domains?.length && params.blocked_domains?.length) {

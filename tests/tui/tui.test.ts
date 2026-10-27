@@ -139,19 +139,27 @@ describe('tui modules', () => {
 
   test('model command resolves daemon-only models from the injected project catalog', async () => {
     const catalogModel = {
-      id: 'catalog-only-model',
-      provider: 'custom:project-catalog',
+      id: 'custom:project-catalog/catalog-only-model',
+      providerId: 'custom:project-catalog',
+      modelId: 'catalog-only-model',
       name: 'Project Catalog Model',
-      api: 'openai-completions',
+      apiId: 'openai-completions',
+      input: ['text'],
+      contextWindow: 8192,
+      maxOutputTokens: 2048,
+      reasoning: false,
     }
     let switched: unknown[] = []
     const app = Object.create(App.prototype) as any
     Object.assign(app, {
-      modelCatalog: { getProjectModels: () => [catalogModel] },
-      agent: {
+      models: {
+        getCatalog: async () => ({
+          models: [catalogModel],
+          providers: [{ id: catalogModel.providerId, name: catalogModel.providerId, models: [catalogModel] }],
+        }),
         switchModel: (...args: unknown[]) => {
           switched = args
-          return { model: catalogModel, provider: catalogModel.provider }
+          return { model: catalogModel, provider: catalogModel.providerId }
         },
       },
       chatContainer: new ChatTranscript(),
@@ -159,11 +167,14 @@ describe('tui modules', () => {
       footer: { invalidate() {} },
       pendingImages: [],
       suppressTrailingQuote: false,
+      clearPendingImages() {},
+      showStatus() {},
+      showError() {},
     })
 
     await app.handleModelCommand('catalog-only-model')
 
-    expect(switched).toEqual(['catalog-only-model', undefined, 'custom:project-catalog'])
+    expect(switched).toEqual(['catalog-only-model', 'openai-completions', 'custom:project-catalog'])
   })
 
   test('gateway auth command uses provider catalog and auth status supplied over RPC', async () => {
@@ -172,7 +183,7 @@ describe('tui modules', () => {
     let selectedItems: unknown[] = []
     const app = Object.create(App.prototype) as any
     Object.assign(app, {
-      modelAuth: {
+      models: {
         async listProviders() {
           providersRequested++
           return [{ id: 'gateway-provider', name: 'Gateway Provider', authChoices: [] }]
@@ -515,10 +526,7 @@ describe('tui modules', () => {
 
   test('assistant transcript keeps thinking blocks out of visible history', () => {
     const assistant = new AssistantMessageComponent(getMarkdownTheme())
-    assistant.updateContent({
-      role: 'assistant',
-      content: [{ type: 'thinking', thinking: 'internal reasoning' }],
-    } as any)
+    assistant.updateContent([{ type: 'thinking', text: 'internal reasoning' }])
 
     const rendered = assistant.render(80).join('\n')
     expect(rendered).not.toContain('internal reasoning')
@@ -598,11 +606,11 @@ describe('tui modules', () => {
     app.setupAgentSubscription()
     const emit = onAgentEvent!
     for (let i = 0; i < 8; i++) {
-      emit({ type: 'turn_end', message: { role: 'assistant', stopReason: 'toolUse' } })
+      emit({ type: 'turn_end', message: { role: 'assistant', stop_reason: 'toolUse' } })
     }
     expect(transcriptChildren).toHaveLength(0)
 
-    emit({ type: 'turn_end', message: { role: 'assistant', stopReason: 'stop' } })
+    emit({ type: 'turn_end', message: { role: 'assistant', stop_reason: 'stop' } })
     expect(transcriptChildren).toHaveLength(1)
 
     // agent_end may follow the final turn_end; finalization must stay idempotent.

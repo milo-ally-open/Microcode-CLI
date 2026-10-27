@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { Type, type Static } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 import type { GitWorkTreeSystem } from '../../git/index.ts'
@@ -23,13 +23,13 @@ const schema = Type.Object({
   })),
 }, { additionalProperties: false })
 
-function textResult<T>(text: string, details: T): AgentToolResult<T> {
+function textResult<T>(text: string, details: T): ToolExecutionResult<T> {
   return { content: [{ type: 'text', text }], details }
 }
 
 export function createGitWorkTreeTool(
   getSystem: () => Promise<GitWorkTreeSystem>,
-): AgentTool<typeof schema, unknown> {
+): ToolAdapter<typeof schema, unknown> {
   let system: GitWorkTreeSystem | undefined
   let systemPromise: Promise<GitWorkTreeSystem> | undefined
   const resolveSystem = async () => {

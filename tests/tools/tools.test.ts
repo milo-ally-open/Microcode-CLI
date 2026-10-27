@@ -3,7 +3,8 @@ import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { Type } from 'typebox'
 import { createMcpTool, formatMcpInputSchema, registerMcpToolsAsDeferred } from '../../src/tools/index.ts'
 import { createCodingTools } from '../../src/tools/index.ts'
-import { formatToolActivity, formatToolDetail, formatToolStatus, formatToolSummary, getAllDeferredToolDefinitions, getAllToolDefinitions, registerDynamicDeferredTool, registerTool, unregisterDynamicDeferredTool } from '../../src/tools/registry.ts'
+import { formatToolSummary, getAllDeferredToolDefinitions, getAllToolDefinitions, registerDynamicDeferredTool, registerTool, unregisterDynamicDeferredTool } from '../../src/tools/registry.ts'
+import { formatToolActivity, formatToolDetail, formatToolStatus, registerToolPresentation } from '../../src/tui/toolPresentationRegistry.ts'
 import { boolTag, count, countLines, joinSummaryParts, previewList, producedText, statusPrefix, text } from '../../src/tools/summary.ts'
 
 describe('tools modules', () => {
@@ -20,7 +21,7 @@ describe('tools modules', () => {
     expect(previewList(['a', 'b', 'c'], 2, 'items')).toBe('items: a, b, ...')
   })
 
-  test('registry display formatters override default MCP summaries', () => {
+  test('runtime tool registration and TUI presentation registration stay separate', () => {
     registerTool({
       name: 'custom_summary_tool',
       policy: { defaultPermission: 'allow' },
@@ -28,11 +29,11 @@ describe('tools modules', () => {
         create: () => ({ name: 'custom_summary_tool', label: 'Custom', description: 'Custom', parameters: Type.Object({}), execute: async () => ({ content: [] }) } as AgentTool),
         summarizeResult: () => 'custom summary',
       },
-      presentation: {
-        activity: () => 'Doing custom work',
-        detail: () => 'custom detail',
-        status: () => 'custom status',
-      },
+    })
+    registerToolPresentation('custom_summary_tool', {
+      activity: () => 'Doing custom work',
+      detail: () => 'custom detail',
+      status: () => 'custom status',
     })
 
     expect(formatToolActivity('custom_summary_tool', {})).toBe('Doing custom work')
@@ -114,20 +115,19 @@ describe('tools modules', () => {
         shouldDefer: true,
         create: () => ({ name: 'DynamicTestTool', label: 'Dynamic', description: 'Dynamic', parameters: Type.Object({}), execute: async () => ({ content: [] }) } as any),
       },
-      presentation: {},
     })
     expect(getAllDeferredToolDefinitions().map((definition) => definition.name)).toContain('DynamicTestTool')
     unregisterDynamicDeferredTool('DynamicTestTool')
   })
 
-  test('every registered tool separates Agent, policy, and presentation contracts', () => {
+  test('runtime registry exposes execution and policy contracts without TUI presentation', () => {
     createCodingTools({ cwd: process.cwd() })
     const definitions = getAllToolDefinitions()
     expect(definitions.length).toBeGreaterThan(0)
     for (const definition of definitions) {
       expect(typeof definition.agent.create).toBe('function')
       expect(definition.policy.defaultPermission).toBeDefined()
-      expect(definition.presentation).toBeDefined()
+      expect('presentation' in definition).toBe(false)
     }
   })
 })

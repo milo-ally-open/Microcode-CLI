@@ -35,9 +35,9 @@ describe('permissions modules', () => {
     expect(manager.checkPermission('read', { path: 'a' }).allowed).toBe(true)
 
     const result = await manager.checkPermissionWithPrompt({
-      toolCall: { name: 'write', arguments: { path: 'a' } },
-      args: { path: 'a' },
-    } as any)
+      toolName: 'write',
+      input: { path: 'a' },
+    })
     expect(result).toBeUndefined()
     expect(requested).toBe(true)
 
@@ -61,9 +61,9 @@ describe('permissions modules', () => {
     expect(manager.getEffectivePolicy().rules[0].toolName).toBe('write')
 
     const askResult = await manager.checkPermissionWithPrompt({
-      toolCall: { name: 'Ask', arguments: { questions: [] } },
-      args: { questions: [] },
-    } as any)
+      toolName: 'Ask',
+      input: { questions: [] },
+    })
     expect(askResult).toBeUndefined()
     expect(askTool.answers).toEqual({ Q: 'A' })
 
@@ -72,14 +72,36 @@ describe('permissions modules', () => {
     prompted.setGetTool(() => undefined)
     prompted.setMode('interactive')
     expect(await prompted.checkPermissionWithPrompt({
-      toolCall: { name: 'write', arguments: { file_path: 'a' } },
-      args: { file_path: 'a' },
-    } as any)).toBeUndefined()
+      toolName: 'write',
+      input: { file_path: 'a' },
+    })).toBeUndefined()
 
     const denied = new PermissionManager({ onPermissionRequest: async () => false })
     expect((await denied.checkPermissionWithPrompt({
-      toolCall: { name: 'write', arguments: { file_path: 'a' } },
-      args: { file_path: 'a' },
-    } as any))?.reason).toContain('denied by user')
+      toolName: 'write',
+      input: { file_path: 'a' },
+    }))?.reason).toContain('denied by user')
+  })
+
+  test('permission manager inherits a snapshot without mutating it and preserves extra denies', () => {
+    const parent = new PermissionManager({
+      mode: 'auto-approve',
+      allowedTools: ['read'],
+      askTools: ['bash'],
+    }).getSnapshot()
+    const child = new PermissionManager({ mode: 'plan', deniedTools: ['write'] })
+
+    child.inheritFrom(parent, [{ toolName: 'mcp__remote__dangerous' }], false)
+
+    const snapshot = child.getSnapshot()
+    expect(snapshot.mode).toBe('plan')
+    expect(snapshot.allowRules).toEqual(parent.allowRules)
+    expect(snapshot.askRules).toEqual(parent.askRules)
+    expect(snapshot.denyRules).toContainEqual({
+      toolName: 'mcp__remote__dangerous',
+      behavior: 'deny',
+      source: 'session',
+    })
+    expect(parent.denyRules).toHaveLength(0)
   })
 })

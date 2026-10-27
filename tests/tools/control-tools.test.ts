@@ -141,7 +141,6 @@ describe('control tools', () => {
             schema: '{"type":"object"}',
             create: () => { throw new Error('should not probe cached schema') },
           },
-          presentation: {},
         },
         {
           name: 'DeferredExample',
@@ -157,7 +156,6 @@ describe('control tools', () => {
               execute: async () => ({ content: [] }),
             } as any),
           },
-          presentation: {},
         },
       ],
       onToolsDiscovered: (names) => discovered.push(names),

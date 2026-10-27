@@ -1,17 +1,6 @@
 import * as path from 'path'
 import * as os from 'os'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
-import {
-  type JsonlSessionMetadata,
-  type AgentMessage,
-} from '@earendil-works/pi-agent-core'
-import { BACKGROUND_CONTEXT } from '@earendil-works/pi-agent-core'
-import { JsonlSessionRepo, type JsonValue, type Session, type Entry } from '@earendil-works/pi-agent-core/harness/session'
-import { NodeFileSystem } from './NodeFileSystem.ts'
-import { replaceImageBlocksForPersistence } from './imageSerializer.ts'
-import { findModel } from '../models/index.ts'
-import { getCompactUserSummaryMessage } from './compactPrompt.ts'
-import { restoreLegacyCompactionContext } from './CompactionManager.ts'
 import type {
   AgentCompactionRecord,
   AgentSessionPersistence,
@@ -22,27 +11,33 @@ import {
   type TaskMarkUpdate,
   type TaskReminderUpdate,
 } from '../tasks/TaskSystem.ts'
+import type {
+  RuntimeSessionMetadata,
+  SessionArchiveEntry,
+  SessionStore,
+  SessionTranscriptAdapter,
+} from './contracts.ts'
 
 const SESSIONS_DIR = path.join(os.homedir(), '.microcode', 'sessions')
 const TITLES_FILE = path.join(SESSIONS_DIR, '.titles.json')
 const TASKS_DIR = path.join(SESSIONS_DIR, '.tasks')
 const COMPACTION_CHECKPOINT_TYPE = 'microcode.compaction-checkpoint'
 
-interface CompactionCheckpoint {
+interface CompactionCheckpoint<Message> {
   version: 1
   summary: string
-  contextMessages: AgentMessage[]
+  contextMessages: Message[]
   tokensBefore: number
   tokensAfter: number
   keptMessageCount: number
   compactedMessageCount: number
   automatic: boolean
-  model: AgentCompactionRecord['model']
+  model: AgentCompactionRecord<Message>['model']
 }
 
-function isCompactionCheckpoint(data: unknown): data is CompactionCheckpoint {
+function isCompactionCheckpoint<Message>(data: unknown): data is CompactionCheckpoint<Message> {
   if (!data || typeof data !== 'object') return false
-  const checkpoint = data as Partial<CompactionCheckpoint>
+  const checkpoint = data as Partial<CompactionCheckpoint<Message>>
   return checkpoint.version === 1 &&
     typeof checkpoint.summary === 'string' &&
     Array.isArray(checkpoint.contextMessages) &&
@@ -50,65 +45,46 @@ function isCompactionCheckpoint(data: unknown): data is CompactionCheckpoint {
     typeof checkpoint.tokensAfter === 'number'
 }
 
-function getLegacyCompactionSummary(message: AgentMessage): { summary: string; tokensBefore: number } | undefined {
-  if (message.role !== 'user' || typeof message.content !== 'string') return undefined
-  const match = message.content.match(/^\[Earlier conversation summarized \((\d+) tokens before compaction\)\]:\n([\s\S]*)$/)
-  if (!match) return undefined
-  return { tokensBefore: Number(match[1]), summary: match[2] ?? '' }
-}
-
-export interface SessionListItem extends JsonlSessionMetadata {
+export type SessionListItem<Metadata extends RuntimeSessionMetadata = RuntimeSessionMetadata> = Metadata & {
   title?: string
 }
 
-/**
- * Manages session lifecycle: create, persist, resume, list.
- * Wraps pi-agent-core's JsonlSessionRepo and Session.
- */
-export class SessionManager implements AgentSessionPersistence {
-  private repo: JsonlSessionRepo
-  private session: Session | null = null
-  private metadata: JsonlSessionMetadata | null = null
+/** Runtime-owned session lifecycle over injected persistence and transcript ports. */
+export class SessionManager<
+  Message,
+  Metadata extends RuntimeSessionMetadata = RuntimeSessionMetadata,
+> implements AgentSessionPersistence<Message> {
+  private metadata: Metadata | null = null
   private draftCwd: string | null = null
   private createPromise: Promise<string> | null = null
   private savedMessageCount = 0
   private titleCache: Map<string, string> | null = null
   private readonly taskSystem: TaskSystem
 
-  constructor(options: { sessionsRoot?: string; tasksRoot?: string } = {}) {
-    const fs = new NodeFileSystem('/')
-    this.repo = new JsonlSessionRepo({
-      fileSystem: fs,
-      sessionsRoot: options.sessionsRoot ?? SESSIONS_DIR,
-    })
+  constructor(private readonly options: {
+    store: SessionStore<Message, Metadata>
+    transcript: SessionTranscriptAdapter<Message>
+    tasksRoot?: string
+  }) {
     this.taskSystem = new TaskSystem(options.tasksRoot ?? TASKS_DIR)
   }
 
-  /**
-   * Create a new session for the given working directory.
-   */
+  /** Create a durable session for the given working directory. */
   async create(cwd: string): Promise<string> {
-    this.session = await this.repo.create({ cwd }, BACKGROUND_CONTEXT)
-    await this.ensureMainBranch(this.session)
-    this.metadata = this.session.metadata as JsonlSessionMetadata
+    this.metadata = await this.options.store.create(cwd)
     this.draftCwd = null
     this.savedMessageCount = 0
     return this.metadata.id
   }
 
-  /**
-   * Start a new in-memory session without writing anything to disk yet.
-   */
+  /** Start a new in-memory session without writing anything to disk yet. */
   beginDraft(cwd: string): void {
-    this.session = null
     this.metadata = null
     this.draftCwd = cwd
     this.savedMessageCount = 0
   }
 
-  /**
-   * Materialize the current draft session only when durable state is needed.
-   */
+  /** Materialize the current draft only when durable state is needed. */
   async ensureCreated(cwd?: string): Promise<string> {
     if (this.metadata?.id) return this.metadata.id
     const targetCwd = cwd ?? this.draftCwd
@@ -125,68 +101,53 @@ export class SessionManager implements AgentSessionPersistence {
     return !this.metadata && Boolean(this.draftCwd)
   }
 
-  /**
-   * Resume an existing session from metadata.
-   */
-  async open(meta: JsonlSessionMetadata): Promise<AgentMessage[]> {
-    this.session = await this.repo.open(meta, BACKGROUND_CONTEXT)
-    await this.ensureMainBranch(this.session)
-    this.metadata = meta
+  /** Resume an existing session from metadata. */
+  async open(metadata: Metadata): Promise<Message[]> {
+    await this.options.store.open(metadata)
+    this.metadata = metadata
     this.draftCwd = null
-    const messages = await this.readSessionMessages(this.session)
+    const messages = await this.readSessionMessages()
     this.savedMessageCount = messages.length
     return messages
   }
 
-  /**
-   * List available sessions, optionally filtered by cwd.
-   */
-  async list(cwd?: string): Promise<JsonlSessionMetadata[]> {
-    return this.repo.list({ cwd }, BACKGROUND_CONTEXT)
+  /** List available sessions, optionally filtered by working directory. */
+  list(cwd?: string): Promise<Metadata[]> {
+    return this.options.store.list(cwd)
   }
 
-  /**
-   * Get the most recent session for a given cwd, if any.
-   */
-  async getLatestSession(cwd: string): Promise<JsonlSessionMetadata | null> {
-    const sessions = await this.list(cwd)
-    return sessions[0] ?? null
+  async getLatestSession(cwd: string): Promise<Metadata | null> {
+    return (await this.list(cwd))[0] ?? null
   }
 
-  /**
-   * Persist new messages to the session.
-   * Only appends messages that haven't been saved yet.
-   */
-  async saveMessages(messages: readonly AgentMessage[]): Promise<void> {
-    if (!this.session) {
+  /** Persist new messages, appending only messages not saved before. */
+  async saveMessages(messages: readonly Message[]): Promise<void> {
+    if (!this.metadata) {
       if (messages.length === 0) return
       await this.ensureCreated()
     }
-    if (!this.session) return
+    if (!this.metadata) return
 
-    // Append only new messages, with image blocks replaced by text references
     for (let i = this.savedMessageCount; i < messages.length; i++) {
-      const serialized = replaceImageBlocksForPersistence(messages[i])
-      const branch = await this.session.branch('main', BACKGROUND_CONTEXT)
-      if (!branch) throw new Error('Session main branch is unavailable.')
-      await branch.appendMessage(serialized, BACKGROUND_CONTEXT)
+      await this.options.store.appendMessage(
+        this.options.transcript.replaceImagesForPersistence(messages[i]!),
+      )
     }
     this.savedMessageCount = messages.length
   }
 
-  async recordCompaction(record: AgentCompactionRecord): Promise<void> {
-    if (!this.session) return
-    const entries = await this.session.findEntries({ order: 'asc' }, BACKGROUND_CONTEXT)
-    const messageEntries = entries.filter((entry) => entry.type === 'message')
-    if (messageEntries.length === 0) {
+  async recordCompaction(record: AgentCompactionRecord<Message>): Promise<void> {
+    if (!this.metadata) return
+    const entries = await this.options.store.loadEntries()
+    if (!entries.some((entry) => entry.type === 'message')) {
       throw new Error('No persisted messages available for compaction.')
     }
-    const branch = await this.session.branch('main', BACKGROUND_CONTEXT)
-    if (!branch) throw new Error('Session main branch is unavailable.')
-    const checkpoint: CompactionCheckpoint = {
+    const checkpoint: CompactionCheckpoint<Message> = {
       version: 1,
       summary: record.summary,
-      contextMessages: record.messages.map(replaceImageBlocksForPersistence),
+      contextMessages: record.messages.map((message) =>
+        this.options.transcript.replaceImagesForPersistence(message),
+      ),
       tokensBefore: record.tokensBefore,
       tokensAfter: record.tokensAfter,
       keptMessageCount: record.keptMessageCount,
@@ -194,57 +155,40 @@ export class SessionManager implements AgentSessionPersistence {
       automatic: record.automatic,
       model: record.model,
     }
-    await branch.appendCustomEntry(
-      COMPACTION_CHECKPOINT_TYPE,
-      checkpoint as unknown as JsonValue,
-      BACKGROUND_CONTEXT,
-    )
+    await this.options.store.appendCustomEntry(COMPACTION_CHECKPOINT_TYPE, checkpoint)
     this.savedMessageCount = record.compactedMessageCount
   }
 
-  /**
-   * Load all messages from the session.
-   */
-  async loadMessages(): Promise<AgentMessage[]> {
-    if (!this.session) return []
-    return this.readSessionMessages(this.session)
+  async loadMessages(): Promise<Message[]> {
+    if (!this.metadata) return []
+    return this.readSessionMessages()
   }
 
-  /** Load the append-only session log for analytics and archival inspection. */
-  async loadArchiveEntries(): Promise<Entry[]> {
-    if (!this.session) return []
-    return this.session.findEntries({ order: 'asc' }, BACKGROUND_CONTEXT)
+  async loadArchiveEntries(): Promise<SessionArchiveEntry<Message>[]> {
+    if (!this.metadata) return []
+    return this.options.store.loadEntries()
   }
 
-  /**
-   * Get the current session metadata.
-   */
-  getMetadata(): JsonlSessionMetadata | null {
+  getMetadata(): Metadata | null {
     return this.metadata
   }
 
-  /**
-   * Get the session ID.
-   */
   getSessionId(): string | null {
     return this.metadata?.id ?? null
   }
 
   async createTaskList(title: string, tasks: readonly string[]): Promise<TaskList> {
-    const sessionId = await this.ensureCreated()
-    return this.taskSystem.createList(sessionId, title, tasks)
+    return this.taskSystem.createList(await this.ensureCreated(), title, tasks)
   }
 
   async listTaskLists(): Promise<TaskList[]> {
     const sessionId = this.getSessionId()
-    if (!sessionId) return []
-    return this.taskSystem.listTaskLists(sessionId)
+    return sessionId ? this.taskSystem.listTaskLists(sessionId) : []
   }
 
   async getTaskReminder(): Promise<string | undefined> {
     const sessionId = this.getSessionId()
-    if (!sessionId) return undefined
-    return this.taskSystem.getReminder(sessionId)
+    return sessionId ? this.taskSystem.getReminder(sessionId) : undefined
   }
 
   async claimTaskList(listId: string): Promise<TaskList> {
@@ -255,10 +199,7 @@ export class SessionManager implements AgentSessionPersistence {
     return this.taskSystem.remindTask(await this.ensureCreated(), listId, taskId, reminder)
   }
 
-  async remindTasks(
-    listId: string,
-    tasks: readonly TaskReminderUpdate[],
-  ): Promise<TaskList> {
+  async remindTasks(listId: string, tasks: readonly TaskReminderUpdate[]): Promise<TaskList> {
     return this.taskSystem.remindTasks(await this.ensureCreated(), listId, tasks)
   }
 
@@ -268,13 +209,7 @@ export class SessionManager implements AgentSessionPersistence {
     completed: boolean,
     pending?: boolean,
   ): Promise<TaskList> {
-    return this.taskSystem.markTask(
-      await this.ensureCreated(),
-      listId,
-      taskId,
-      completed,
-      pending,
-    )
+    return this.taskSystem.markTask(await this.ensureCreated(), listId, taskId, completed, pending)
   }
 
   async markTasks(input: {
@@ -284,136 +219,81 @@ export class SessionManager implements AgentSessionPersistence {
     return this.taskSystem.markTasks(await this.ensureCreated(), input)
   }
 
-  /**
-   * Delete a session.
-   */
-  async delete(meta: JsonlSessionMetadata): Promise<void> {
-    await this.repo.delete(meta, BACKGROUND_CONTEXT)
+  async delete(metadata: Metadata): Promise<void> {
+    await this.options.store.delete(metadata)
   }
 
-  /**
-   * Load the titles map from disk into cache.
-   */
   private loadTitles(): void {
     if (this.titleCache) return
     try {
-      if (existsSync(TITLES_FILE)) {
-        const raw = readFileSync(TITLES_FILE, 'utf-8')
-        const data = JSON.parse(raw)
-        this.titleCache = new Map(Object.entries(data))
-      } else {
-        this.titleCache = new Map()
-      }
+      this.titleCache = existsSync(TITLES_FILE)
+        ? new Map(Object.entries(JSON.parse(readFileSync(TITLES_FILE, 'utf-8'))))
+        : new Map()
     } catch {
       this.titleCache = new Map()
     }
   }
 
-  /**
-   * Save the titles cache back to disk.
-   */
   private saveTitles(): void {
     try {
       const dir = path.dirname(TITLES_FILE)
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true })
-      }
-      const data = Object.fromEntries(this.titleCache ?? new Map())
-      writeFileSync(TITLES_FILE, JSON.stringify(data, null, 2))
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      writeFileSync(TITLES_FILE, JSON.stringify(Object.fromEntries(this.titleCache ?? new Map()), null, 2))
     } catch {}
   }
 
-  /**
-   * Set the title for a session.
-   */
   setTitle(sessionId: string, title: string): void {
     this.loadTitles()
     this.titleCache!.set(sessionId, title)
     this.saveTitles()
   }
 
-  /**
-   * Get the title for a session.
-   */
   getTitle(sessionId: string): string | undefined {
     this.loadTitles()
     return this.titleCache?.get(sessionId)
   }
 
-  /**
-   * List sessions enriched with titles.
-   */
-  async listWithTitles(cwd?: string): Promise<SessionListItem[]> {
-    const sessions = await this.repo.list({ cwd }, BACKGROUND_CONTEXT)
+  async listWithTitles(cwd?: string): Promise<SessionListItem<Metadata>[]> {
+    const sessions = await this.options.store.list(cwd)
     this.loadTitles()
-    return sessions.map((s) => ({
-      ...s,
-      title: this.titleCache?.get(s.id),
-    }))
+    return sessions.map((session) => ({ ...session, title: this.titleCache?.get(session.id) }))
   }
 
-  /**
-   * Switch to a different session, returning its messages.
-   * The caller is responsible for persisting the current runtime first.
-   */
-  async switchToSession(meta: JsonlSessionMetadata): Promise<AgentMessage[]> {
-    this.session = await this.repo.open(meta, BACKGROUND_CONTEXT)
-    await this.ensureMainBranch(this.session)
-    this.metadata = meta
-    this.draftCwd = null
-    const messages = await this.readSessionMessages(this.session)
-    this.savedMessageCount = messages.length
-    return messages
+  /** Switch active session; the caller persists the current runtime first. */
+  async switchToSession(metadata: Metadata): Promise<Message[]> {
+    return this.open(metadata)
   }
 
-  private async readSessionMessages(session: Session): Promise<AgentMessage[]> {
-    const entries = await session.findEntries({ order: 'asc' }, BACKGROUND_CONTEXT)
-    let messages: AgentMessage[] = []
+  private async readSessionMessages(): Promise<Message[]> {
+    const entries = await this.options.store.loadEntries()
+    let messages: Message[] = []
     for (const entry of entries) {
       if (entry.type === 'message') {
-        const legacy = getLegacyCompactionSummary(entry.message)
-        if (legacy) {
-          const priorAssistant = [...messages].reverse().find((message) => message.role === 'assistant')
-          const model = priorAssistant?.role === 'assistant'
-            ? findModel(priorAssistant.model, priorAssistant.api, String(priorAssistant.provider))
-            : undefined
-          messages = model
-            ? restoreLegacyCompactionContext(
-                messages,
-                model.contextWindow,
-                legacy.tokensBefore,
-                legacy.summary,
-                entry.timestamp,
-              )
-            : [...messages, entry.message]
-        } else {
-          messages.push(entry.message)
-        }
-        continue
-      }
-
-      if (entry.type === 'compaction') {
+        messages = [...(
+          this.options.transcript.restoreLegacyCompactionContext(
+            messages,
+            entry.message,
+            entry.timestamp,
+          ) ?? [...messages, entry.message]
+        )]
+      } else if (entry.type === 'compaction') {
         messages = [
-          { role: 'user', content: getCompactUserSummaryMessage(entry.summary), timestamp: entry.timestamp },
+          this.options.transcript.createSummaryMessage(entry.summary, entry.timestamp, 'compaction'),
           ...entry.retainedTail,
         ]
       } else if (entry.type === 'branch_summary') {
-        messages.push({ role: 'user', content: `[Conversation summary]:\n${entry.summary}`, timestamp: entry.timestamp })
-      } else if (entry.type === 'custom' &&
+        messages.push(this.options.transcript.createSummaryMessage(entry.summary, entry.timestamp, 'branch_summary'))
+      } else if (
         entry.customType === COMPACTION_CHECKPOINT_TYPE &&
-        isCompactionCheckpoint(entry.data)) {
+        isCompactionCheckpoint<Message>(entry.data)
+      ) {
         messages = [...entry.data.contextMessages]
       }
     }
     return messages
   }
 
-  private async ensureMainBranch(session: Session): Promise<void> {
-    if (await session.branch('main', BACKGROUND_CONTEXT)) return
-    await session.createBranch('main', null, BACKGROUND_CONTEXT)
-  }
-
-  async close(): Promise<void> {
-    await this.repo.close(BACKGROUND_CONTEXT)
+  close(): Promise<void> {
+    return this.options.store.close()
   }
 }

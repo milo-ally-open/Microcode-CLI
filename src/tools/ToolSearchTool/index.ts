@@ -25,5 +25,4 @@ registerTool({
     formatDescription: (input) => typeof input.query === 'string' ? `search: ${input.query}` : '(tool search)',
     extractMatchContent: (input) => typeof input.query === 'string' ? input.query : undefined,
   },
-  presentation: {},
 })

@@ -1,10 +1,11 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
-import type { AssistantMessageEvent, AuthPrompt, AuthType } from '@earendil-works/pi-ai'
+import type { ModelAuthPrompt, ModelAuthType } from '../models/contracts.ts'
+import type { ModelInferenceContext, ModelStreamEvent } from '../models/inference.ts'
 import { describeModel, type GatewayModelRuntime, type GatewayServerHandle, type GatewayServerOptions, type GatewayDialect, type GatewayRequestOptions } from './types.ts'
-import { GatewayProtocolError, parseAnthropicRequest, parseOpenAiChatRequest, parseResponsesRequest, serializeAnthropic, serializeOpenAiChat, serializeResponses } from './protocol.ts'
-import { protocolEvents, SseFrameEncoder } from './streaming.ts'
+import { GatewayProtocolError, parseAnthropicRequest, parseGeminiRequest, parseOpenAiChatRequest, parseResponsesRequest, serializeAnthropic, serializeGemini, serializeOpenAiChat, serializeResponses } from './protocol.ts'
+import { geminiEvents, protocolEvents, SseFrameEncoder } from './streaming.ts'
 import { AsyncQueue } from './asyncQueue.ts'
 
 const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -16,6 +17,7 @@ const UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90 * 1000
 const MAX_AUTH_SESSIONS = 2
 export const GATEWAY_PROTOCOL_VERSION = 1
+export const GATEWAY_RPC_PROTOCOL_VERSION = 2
 const RPC_VERSION_HEADER = 'x-microcode-rpc-version'
 
 function json(data: unknown, status = 200, extraHeaders?: HeadersInit): Response {
@@ -27,8 +29,19 @@ function json(data: unknown, status = 200, extraHeaders?: HeadersInit): Response
 
 function errorResponse(status: number, message: string, dialect?: GatewayDialect): Response {
   if (dialect === 'anthropic-messages') return json({ type: 'error', error: { type: status === 401 ? 'authentication_error' : 'invalid_request_error', message } }, status)
+  if (dialect === 'gemini-generate') return json({ error: { code: status, status: geminiStatus(status), message } }, status)
   if (dialect === 'openai-chat' || dialect === 'openai-responses') return json({ error: { message, type: status === 401 ? 'authentication_error' : 'invalid_request_error', code: status } }, status)
   return json({ error: message }, status)
+}
+
+function geminiStatus(status: number): string {
+  if (status === 400) return 'INVALID_ARGUMENT'
+  if (status === 401) return 'UNAUTHENTICATED'
+  if (status === 403) return 'PERMISSION_DENIED'
+  if (status === 404) return 'NOT_FOUND'
+  if (status === 413 || status === 429) return 'RESOURCE_EXHAUSTED'
+  if (status === 504) return 'DEADLINE_EXCEEDED'
+  return 'UNAVAILABLE'
 }
 
 function tokenFromRequest(request: Request): string | undefined {
@@ -37,7 +50,7 @@ function tokenFromRequest(request: Request): string | undefined {
     const bearer = /^Bearer\s+(.+)$/i.exec(auth.trim())
     if (bearer) return bearer[1]
   }
-  return request.headers.get('x-api-key') ?? undefined
+  return request.headers.get('x-api-key') ?? request.headers.get('x-goog-api-key') ?? undefined
 }
 
 function authenticated(request: Request, expected: string): boolean {
@@ -187,7 +200,7 @@ async function* withSequenceNumbers<T extends { data: unknown }>(
   }
 }
 
-async function* terminalEvents(events: AsyncIterable<AssistantMessageEvent>): AsyncGenerator<AssistantMessageEvent> {
+async function* terminalEvents(events: AsyncIterable<ModelStreamEvent>): AsyncGenerator<ModelStreamEvent> {
   for await (const event of events) {
     yield event
     if (event.type === 'done' || event.type === 'error') return
@@ -195,10 +208,10 @@ async function* terminalEvents(events: AsyncIterable<AssistantMessageEvent>): As
   throw new Error('The model stream ended without a terminal event.')
 }
 
-async function* enforceSingleToolCall(events: AsyncIterable<AssistantMessageEvent>): AsyncGenerator<AssistantMessageEvent> {
+async function* enforceSingleToolCall(events: AsyncIterable<ModelStreamEvent>): AsyncGenerator<ModelStreamEvent> {
   let buffering = false
   let toolCallCount = 0
-  const buffered: AssistantMessageEvent[] = []
+  const buffered: ModelStreamEvent[] = []
   for await (const event of events) {
     if (!buffering && event.type !== 'toolcall_start') {
       yield event
@@ -218,11 +231,11 @@ async function* enforceSingleToolCall(events: AsyncIterable<AssistantMessageEven
 }
 
 async function* abortableEvents(
-  events: AsyncIterable<AssistantMessageEvent>,
+  events: AsyncIterable<ModelStreamEvent>,
   signal: AbortSignal,
   idleTimeoutMs?: number,
   controller?: AbortController,
-): AsyncGenerator<AssistantMessageEvent> {
+): AsyncGenerator<ModelStreamEvent> {
   const iterator = events[Symbol.asyncIterator]()
   let complete = false
   try {
@@ -243,7 +256,7 @@ async function* abortableEvents(
               reject(error)
             }, idleTimeoutMs)
           })
-      let next: IteratorResult<AssistantMessageEvent>
+      let next: IteratorResult<ModelStreamEvent>
       try {
         next = await Promise.race(idleTimeout ? [iterator.next(), aborted, idleTimeout] : [iterator.next(), aborted])
       } finally {
@@ -272,21 +285,38 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
-function protocolParse(dialect: Exclude<GatewayDialect, 'internal'>, body: unknown) {
+function protocolParse(dialect: Exclude<GatewayDialect, 'internal'>, body: unknown, gemini?: { modelId: string; stream: boolean }) {
   if (dialect === 'openai-chat') return parseOpenAiChatRequest(body)
   if (dialect === 'anthropic-messages') return parseAnthropicRequest(body)
+  if (dialect === 'gemini-generate') {
+    if (!gemini) throw new GatewayProtocolError('Invalid Gemini model route.')
+    return parseGeminiRequest(body, gemini.modelId, gemini.stream)
+  }
   return parseResponsesRequest(body)
+}
+
+function geminiRoute(path: string): { modelId: string; stream: boolean } | undefined {
+  const match = /^\/v1beta\/models\/(.+):(generateContent|streamGenerateContent)$/.exec(path)
+  if (!match) return undefined
+  try {
+    const modelId = decodeURIComponent(match[1]!)
+    if (!modelId || modelId.includes('..')) return undefined
+    return { modelId, stream: match[2] === 'streamGenerateContent' }
+  } catch {
+    return undefined
+  }
 }
 
 function inferDialect(path: string): Exclude<GatewayDialect, 'internal'> | undefined {
   if (path === '/v1/chat/completions') return 'openai-chat'
   if (path === '/v1/messages') return 'anthropic-messages'
   if (path === '/v1/responses') return 'openai-responses'
+  if (geminiRoute(path)) return 'gemini-generate'
   return undefined
 }
 
 function rpcVersionMatches(request: Request): boolean {
-  return request.headers.get(RPC_VERSION_HEADER) === String(GATEWAY_PROTOCOL_VERSION)
+  return request.headers.get(RPC_VERSION_HEADER) === String(GATEWAY_RPC_PROTOCOL_VERSION)
 }
 
 class GatewayRequestRegistry {
@@ -385,7 +415,7 @@ class GatewayRequestHandler {
     }
     if (!authenticated(request, isInternal ? options.rpcToken : options.token)) return errorResponse(401, isInternal ? 'A valid Microcode internal RPC token is required.' : 'A valid Microcode gateway token is required.', dialect)
     if (isInternal && !rpcVersionMatches(request)) return errorResponse(426, 'Unsupported internal RPC version.', dialect)
-    if (handshakePath) return json({ status: 'ok', protocol_version: GATEWAY_PROTOCOL_VERSION })
+    if (handshakePath) return json({ status: 'ok', protocol_version: GATEWAY_RPC_PROTOCOL_VERSION })
     if (isTuiModels) {
       const cwd = await projectDirectory(url.searchParams.get('cwd') ?? undefined)
       const models = options.runtime.getModels(cwd).map(describeModel)
@@ -498,9 +528,9 @@ class GatewayRequestHandler {
           removeAbortListener: () => authSignal.removeEventListener('abort', onAbort),
         })
         let promptSequence = 0
-        const login = options.runtime.login(providerId, authType as AuthType, {
+        const login = options.runtime.login(providerId, authType as ModelAuthType, {
           signal: authSignal,
-          prompt: (prompt: AuthPrompt) => new Promise<string>((resolve, reject) => {
+          prompt: (prompt: ModelAuthPrompt) => new Promise<string>((resolve, reject) => {
             if (authSignal.aborted) { reject(authSignal.reason ?? new Error('Authentication cancelled.')); return }
             const promptId = `${sessionId}:${++promptSequence}`
             const cleanup = () => {
@@ -556,12 +586,12 @@ class GatewayRequestHandler {
         if (!value || typeof value.model !== 'string' || !value.context || typeof value.context !== 'object') throw new GatewayProtocolError('Internal request requires model and context.')
         const cwd = await projectDirectory(value.cwd)
         const model = await resolveModel(options.runtime, value.model, cwd)
-        const context = value.context as Parameters<GatewayModelRuntime['stream']>[1]
+        const context = value.context as ModelInferenceContext
         const rawOptions = value.options && typeof value.options === 'object' ? value.options as Record<string, unknown> : {}
         const safeOptions: GatewayRequestOptions = {
           ...(typeof rawOptions.maxTokens === 'number' ? { maxTokens: rawOptions.maxTokens } : {}),
           ...(typeof rawOptions.temperature === 'number' ? { temperature: rawOptions.temperature } : {}),
-          ...(typeof rawOptions.reasoning === 'string' ? { reasoning: rawOptions.reasoning as any } : {}),
+          ...(typeof rawOptions.reasoning === 'string' ? { reasoning: rawOptions.reasoning as GatewayRequestOptions['reasoning'] } : {}),
           ...(rawOptions.toolChoice === 'auto' || rawOptions.toolChoice === 'none' ? { toolChoice: rawOptions.toolChoice as 'auto' | 'none' } : {}),
           ...(rawOptions.samplingParams && typeof rawOptions.samplingParams === 'object' ? { samplingParams: rawOptions.samplingParams as Record<string, unknown> } : {}),
         }
@@ -580,8 +610,14 @@ class GatewayRequestHandler {
         })
       }
 
-      const parsed = protocolParse(dialect!, body)
+      const parsed = protocolParse(dialect!, body, geminiRoute(url.pathname))
       const model = await resolveModel(options.runtime, parsed.modelId)
+      const requestsImages = parsed.context.messages.some((message) =>
+        'content' in message && Array.isArray(message.content) && message.content.some((block) => block.type === 'image'),
+      )
+      if (requestsImages && !model.input.includes('image')) {
+        throw new GatewayProtocolError('The selected model does not support image input.')
+      }
       if (parsed.options.reasoning && !model.reasoning) throw new GatewayProtocolError('The selected model does not support reasoning controls.')
       if (parsed.options.reasoningSummary) {
         if (!model.reasoning) throw new GatewayProtocolError('The selected model does not support reasoning summaries.')
@@ -594,10 +630,13 @@ class GatewayRequestHandler {
       }
       if (parsed.stream) {
         const streamSignal = signal
-        let generationEvents: AsyncIterable<AssistantMessageEvent> = terminalEvents(options.runtime.stream(model, parsed.context, { ...parsed.options, signal: streamSignal }))
+        const context = parsed.context
+        let generationEvents: AsyncIterable<ModelStreamEvent> = terminalEvents(options.runtime.stream(model, context, { ...parsed.options, signal: streamSignal }))
         if (parsed.options.parallelToolCalls === false) generationEvents = enforceSingleToolCall(generationEvents)
         const events = abortableEvents(generationEvents, streamSignal, streamIdleTimeout, controller)
-        const iterable = protocolEvents(dialect!, events, model, parsed.anthropicThinkingDisplay, Boolean(parsed.options.reasoningSummary), parsed.responsesToolNamespaces)
+        const iterable = dialect === 'gemini-generate'
+          ? geminiEvents(events, model)
+          : protocolEvents(dialect!, events, model, parsed.anthropicThinkingDisplay, Boolean(parsed.options.reasoningSummary), parsed.responsesToolNamespaces)
         const sequence = { value: 0 }
         const streamItems = dialect === 'openai-responses' ? withSequenceNumbers(iterable, sequence) : iterable
         const frameEncoder = new SseFrameEncoder(dialect!)
@@ -609,22 +648,26 @@ class GatewayRequestHandler {
             ? `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: errorMessage(error) } })}\n\n`
             : dialect === 'openai-responses'
               ? `event: response.failed\ndata: ${JSON.stringify({ type: 'response.failed', response: { status: 'failed', error: { message: errorMessage(error) } }, sequence_number: sequence.value++ })}\n\n`
-              : `data: ${JSON.stringify({ error: { message: errorMessage(error), type: 'server_error' } })}\n\ndata: [DONE]\n\n`
+              : dialect === 'gemini-generate'
+                ? `data: ${JSON.stringify({ error: { code: 502, status: 'UNAVAILABLE', message: errorMessage(error) } })}\n\n`
+                : `data: ${JSON.stringify({ error: { message: errorMessage(error), type: 'server_error' } })}\n\ndata: [DONE]\n\n`
           return new TextEncoder().encode(data)
         }, release, () => controller.abort())
         return new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-content-type-options': 'nosniff' } })
       }
-      const message = await withAbort(options.runtime.complete(model, parsed.context, { ...parsed.options, signal }), signal)
-      if (message.stopReason === 'error') throw new Error('Provider generation failed.')
-      if (parsed.options.parallelToolCalls === false && message.content.filter((block) => block.type === 'toolCall').length > 1) {
+      const completion = await withAbort(options.runtime.complete(model, parsed.context, { ...parsed.options, signal }), signal)
+      if (completion.stopReason === 'error') throw new Error('Provider generation failed.')
+      if (parsed.options.parallelToolCalls === false && completion.content.filter((block) => block.type === 'tool_call').length > 1) {
         throw new GatewayProtocolError('The model returned multiple tool calls while parallel_tool_calls=false.', 502)
       }
       release()
       const response = dialect === 'openai-chat'
-        ? serializeOpenAiChat(message, model)
+        ? serializeOpenAiChat(completion, model)
         : dialect === 'anthropic-messages'
-          ? serializeAnthropic(message, model, parsed.anthropicThinkingDisplay)
-          : serializeResponses(message, model, Boolean(parsed.options.reasoningSummary), parsed.responsesToolNamespaces)
+          ? serializeAnthropic(completion, model, parsed.anthropicThinkingDisplay)
+          : dialect === 'gemini-generate'
+            ? serializeGemini(completion, model)
+          : serializeResponses(completion, model, Boolean(parsed.options.reasoningSummary), parsed.responsesToolNamespaces)
       return json(response)
     } catch (error) {
       release()

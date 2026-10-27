@@ -1,65 +1,27 @@
-import type { AssistantMessage, AssistantMessageEvent, AuthEvent, AuthPrompt, AuthType, Context, Model, SimpleStreamOptions, Api } from '@earendil-works/pi-ai'
+import type { ModelAuthInteraction, ModelProviderDescriptor, ModelProviderRuntime, ModelRuntimeOptions } from '../models/runtime.ts'
+import type { ModelInferenceContext, ModelRuntimeDescriptor } from '../models/inference.ts'
 
-export type GatewayDialect = 'internal' | 'openai-chat' | 'openai-responses' | 'anthropic-messages'
+export type GatewayRequestOptions = ModelRuntimeOptions
+export type GatewayProviderDescriptor = ModelProviderDescriptor
+export type GatewayAuthInteraction = ModelAuthInteraction
+export type GatewayModelRuntime = ModelProviderRuntime
 
-export interface GatewayRequestOptions {
-  maxTokens?: number
-  temperature?: number
-  reasoning?: SimpleStreamOptions['reasoning']
-  reasoningSummary?: 'auto' | 'concise' | 'detailed'
-  toolChoice?: SimpleStreamOptions['toolChoice']
-  parallelToolCalls?: boolean
-  samplingParams?: Record<string, unknown>
-}
+export type GatewayDialect = 'internal' | 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'gemini-generate'
 
 export interface GatewayChatRequest {
   modelId: string
-  context: Context
+  context: ModelInferenceContext
   options: GatewayRequestOptions
   stream: boolean
   anthropicThinkingDisplay?: 'summarized' | 'omitted'
   responsesToolNamespaces?: ReadonlyMap<string, { namespace: string; name: string }>
 }
 
-export interface GatewayModelDescriptor {
-  id: string
-  name: string
-  provider: string
-  api: string
-  input: string[]
-  contextWindow: number
-  maxTokens: number
-  reasoning: boolean
-  cost: Model<Api>['cost']
-  thinkingLevelMap?: Model<Api>['thinkingLevelMap']
-  samplingParams?: Model<Api>['samplingParams']
-  promptCache?: Model<Api>['promptCache']
-  inputLimits?: Model<Api>['inputLimits']
-  compat?: Model<Api>['compat']
-}
+export interface GatewayModelDescriptor extends ModelRuntimeDescriptor {}
 
-export interface GatewayProviderDescriptor {
-  id: string
-  name: string
-  authChoices: Array<{ value: AuthType; label: string; description: string }>
-}
-
-export interface GatewayAuthInteraction {
-  signal: AbortSignal
-  prompt(prompt: AuthPrompt): Promise<string>
-  notify(event: AuthEvent): void
-}
-
-export interface GatewayModelRuntime {
-  getModels(projectCwd?: string): readonly Model<Api>[]
-  getCurrentModel?(projectCwd?: string): Model<Api> | undefined
-  getProviders(projectCwd?: string): readonly GatewayProviderDescriptor[]
-  checkAuth(providerId: string, projectCwd: string | undefined, signal: AbortSignal): Promise<{ type: AuthType } | undefined>
-  login(providerId: string, type: AuthType, interaction: GatewayAuthInteraction, projectCwd?: string): Promise<void>
-  logout(providerId: string, projectCwd: string | undefined, signal: AbortSignal): Promise<void>
-  resolveModel(modelId: string, projectCwd?: string): Model<Api> | undefined | Promise<Model<Api> | undefined>
-  stream(model: Model<Api>, context: Context, options: GatewayRequestOptions & { signal?: AbortSignal }): AsyncIterable<AssistantMessageEvent>
-  complete(model: Model<Api>, context: Context, options: GatewayRequestOptions & { signal?: AbortSignal }): Promise<AssistantMessage>
+export interface GatewayModelIdentity {
+  readonly id: string
+  readonly provider: string
 }
 
 export interface GatewayServerOptions {
@@ -80,17 +42,17 @@ export interface GatewayServerHandle {
   stop(): Promise<void> | void
 }
 
-export function describeModel(model: Model<Api>): GatewayModelDescriptor {
+export function describeModel(model: ModelRuntimeDescriptor): GatewayModelDescriptor {
   return {
     id: `${model.provider}/${model.id}`,
     name: model.name,
-    provider: String(model.provider),
+    provider: model.provider,
     api: model.api,
     input: [...model.input],
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     reasoning: model.reasoning,
-    cost: { ...model.cost },
+    cost: structuredClone(model.cost),
     ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
     ...(model.samplingParams ? { samplingParams: { ...model.samplingParams } } : {}),
     ...(model.promptCache ? { promptCache: { ...model.promptCache } } : {}),

@@ -1,6 +1,6 @@
 import { matchesKey, type Component, visibleWidth } from '@earendil-works/pi-tui'
 import { theme } from '../theme.ts'
-import type { ToolInteractionTarget } from '../../tools/registry.ts'
+import type { ToolInteractionTarget } from '../toolPresentationRegistry.ts'
 
 const RETURN_TO_BOTTOM_LABEL = 'Return to bottom'
 
@@ -29,6 +29,8 @@ export class AppLayout implements Component {
     private readonly getHeight: () => number,
     private readonly getToolInteractionTargets: (width: number) => ToolInteractionTarget[] = () => [],
   ) {}
+
+  invalidate(): void {}
 
   /** Scroll continuously by rendered chat rows; positive values move toward newer content. */
   scrollBy(delta: number): boolean {

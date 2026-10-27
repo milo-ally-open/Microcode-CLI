@@ -1,32 +1,9 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core'
-import type { Component } from '@earendil-works/pi-tui'
 import type { PermissionBehavior } from '../permissions/types.ts'
-import type { AgentSessionPersistence } from '../agent/persistence.ts'
+import type { ToolAdapter, ToolTaskPersistence } from './contracts.ts'
 
 // ============================================================================
 // Types
 // ============================================================================
-
-/** 工具 UI 组件的公共接口 */
-export interface ToolUIComponent extends Component {
-  setExpanded(expanded: boolean): void
-  getInteractionTargets?(renderedLines: readonly string[]): ToolInteractionTarget[]
-  hasToggleButton?(): boolean
-  toggleExpanded?(): void
-  markExecutionStarted(): void
-  updateArgs?(args: Record<string, unknown>): void
-  updateElapsed?(elapsedMs: number): void
-  updateResult(result: ToolResult, isPartial?: boolean): void
-  updateDetails?(details: Record<string, unknown>): void
-}
-
-export interface ToolInteractionTarget {
-  action: 'toggle-preview'
-  rowOffset: number
-  startColumn: number
-  endColumn: number
-  activate: () => void
-}
 
 export interface ToolResult {
   content: Array<{ type: string; text?: string }>
@@ -34,16 +11,8 @@ export interface ToolResult {
   details?: Record<string, unknown>
 }
 
-/** UI 组件构造器 */
-export type ToolUIConstructor = new (toolCallId: string, args: any) => ToolUIComponent
-
 export interface ToolCreationContext {
-  getPersistence?: () => AgentSessionPersistence | undefined
-}
-
-export interface ToolDisplayContext {
-  input: Record<string, unknown>
-  details?: Record<string, unknown>
+  getPersistence?: () => ToolTaskPersistence | undefined
 }
 
 export interface ToolSummaryContext {
@@ -56,14 +25,8 @@ export interface ToolSummaryContext {
   }
 }
 
-export interface ToolDisplayFormatters {
-  activity?: (context: ToolDisplayContext) => string | undefined // Short active-turn text shown next to an agent, e.g. "Reading src/app.ts".
-  detail?: (context: ToolDisplayContext) => string | undefined // Compact argument text shown after a tool name in the agent tree.
-  status?: (context: ToolDisplayContext) => string | undefined // Compact progress/result text shown while a tool is running.
-}
-
 export interface ToolAgentDefinition {
-  create: (cwd: string, context?: ToolCreationContext) => AgentTool<any, any>
+  create: (cwd: string, context?: ToolCreationContext) => ToolAdapter<any, any>
   /** Search/discovery metadata exposed to the Agent, not user-facing copy. */
   description?: string
   schema?: string
@@ -78,60 +41,15 @@ export interface ToolPolicyDefinition {
   defaultPermission: PermissionBehavior
 }
 
-export interface ToolPresentationDefinition extends ToolDisplayFormatters {
-  View?: ToolUIConstructor
-  /** Project streamed input into presentation-only structured details. */
-  projectInput?: (cwd: string, input: Record<string, unknown>) => Record<string, unknown> | undefined
-  /** Build presentation-only approval preview details for this tool call. */
-  prepareApproval?: (
-    cwd: string,
-    input: Record<string, unknown>,
-  ) => Promise<Record<string, unknown> | undefined>
-}
-
 export interface ToolDefinition {
+  /** Stable, repository-unique tool ID. `name` is also the kernel-facing tool name. */
   name: string
+  /** Contract revision for this tool adapter. Increment when its input/output contract changes. */
+  version?: number
+  /** Whether the Agent may enable or disable this registered implementation at runtime. */
+  mutable?: boolean
   agent: ToolAgentDefinition
   policy: ToolPolicyDefinition
-  presentation: ToolPresentationDefinition
-}
-
-export type ToolLifecycleEvent =
-  | { phase: 'created'; input: Record<string, unknown> }
-  | { phase: 'running' }
-  | { phase: 'awaiting-approval' }
-  | { phase: 'input'; input: Record<string, unknown> }
-  | { phase: 'presentation'; details: Record<string, unknown> }
-  | { phase: 'partial'; result: ToolResult }
-  | { phase: 'completed'; result: ToolResult }
-  | { phase: 'failed'; result: ToolResult }
-  | { phase: 'cancelled'; details?: Record<string, unknown> }
-
-/** One compatibility boundary maps generic lifecycle events onto existing tool views. */
-export function dispatchToolLifecycle(
-  view: ToolUIComponent,
-  event: ToolLifecycleEvent,
-): void {
-  switch (event.phase) {
-    case 'created': view.updateArgs?.(event.input); break
-    case 'running': view.markExecutionStarted(); break
-    case 'awaiting-approval': view.updateDetails?.({ phase: 'approval' }); break
-    case 'input': view.updateArgs?.(event.input); break
-    case 'presentation': view.updateDetails?.(event.details); break
-    case 'partial':
-      view.updateResult(event.result, true)
-      if (event.result.details) view.updateDetails?.(event.result.details)
-      break
-    case 'completed':
-      view.updateResult(event.result)
-      if (event.result.details) view.updateDetails?.(event.result.details)
-      break
-    case 'failed':
-      view.updateResult(event.result)
-      if (event.result.details) view.updateDetails?.(event.result.details)
-      break
-    case 'cancelled': view.updateDetails?.({ ...event.details, phase: 'cancelled' }); break
-  }
 }
 
 // ============================================================================
@@ -140,8 +58,21 @@ export function dispatchToolLifecycle(
 
 const registry = new Map<string, ToolDefinition>()
 
-export function registerTool(def: ToolDefinition): void {
-  registry.set(def.name, def)
+export function registerTool(
+  def: ToolDefinition,
+  options: { replaceExisting?: boolean } = {},
+): void {
+  const version = def.version ?? 1
+  if (!Number.isInteger(version) || version < 1) {
+    throw new Error(`Tool "${def.name}" must declare a positive integer contract version`)
+  }
+  if (registry.has(def.name) && !options.replaceExisting) {
+    throw new Error(`Tool ID "${def.name}" is already registered`)
+  }
+  if (dynamicDeferredTools.has(def.name)) {
+    throw new Error(`Tool ID "${def.name}" is already registered as a dynamic deferred tool`)
+  }
+  registry.set(def.name, { ...def, version })
 }
 
 export function getToolDefinition(name: string): ToolDefinition | undefined {
@@ -150,10 +81,6 @@ export function getToolDefinition(name: string): ToolDefinition | undefined {
 
 export function getAllToolDefinitions(): ToolDefinition[] {
   return Array.from(registry.values())
-}
-
-export function getToolUIConstructor(name: string): ToolUIConstructor | undefined {
-  return registry.get(name)?.presentation.View
 }
 
 function formatMcpToolName(name: string): string | undefined {
@@ -196,34 +123,6 @@ export function formatToolSummary(
   return `[${formattedName}] ${status} · ${produced}`
 }
 
-export function formatToolActivity(
-  name: string,
-  input: Record<string, unknown>,
-): string {
-  const formatted = registry.get(name)?.presentation.activity?.({ input })
-  if (formatted) return formatted
-  return `Using ${formatMcpToolName(name) ?? name}`
-}
-
-export function formatToolDetail(
-  name: string,
-  input: Record<string, unknown>,
-): string {
-  const def = registry.get(name)
-  const formatted = def?.presentation.detail?.({ input })
-  if (formatted) return formatted
-  return formatMcpToolName(name) ?? ''
-}
-
-export function formatToolStatus(
-  name: string,
-  input: Record<string, unknown>,
-  details?: Record<string, unknown>,
-): string | undefined {
-  return registry.get(name)?.presentation.status?.({ input, details })
-    ?? (details ? undefined : formatMcpToolName(name))
-}
-
 export function getToolDefaultPermissions(): Record<string, PermissionBehavior> {
   const result: Record<string, PermissionBehavior> = {}
   for (const [name, def] of registry) {
@@ -255,7 +154,14 @@ const dynamicDeferredTools = new Map<string, ToolDefinition>()
 
 /** Register a dynamically created tool as deferred (e.g., MCP tools). */
 export function registerDynamicDeferredTool(def: ToolDefinition): void {
-  dynamicDeferredTools.set(def.name, def)
+  if (registry.has(def.name)) {
+    throw new Error(`Tool ID "${def.name}" is already registered`)
+  }
+  const version = def.version ?? 1
+  if (!Number.isInteger(version) || version < 1) {
+    throw new Error(`Tool "${def.name}" must declare a positive integer contract version`)
+  }
+  dynamicDeferredTools.set(def.name, { ...def, version })
 }
 
 /** Remove a dynamically registered deferred tool. */

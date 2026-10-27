@@ -1,11 +1,12 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import { createMicrocodeAgentRuntime } from './agent/index.ts'
-import { getAllModels, getCustomModelDefs, getModels } from './models/index.ts'
+import { getAllModels, getModelConfigDiagnostics, getModels } from './models/index.ts'
 import { App } from './tui/app.ts'
 import { McpClientManager } from './mcp/client.ts'
 import { getProjectConfigPath, getUserConfigPath, isMcpConfigEmpty } from './mcp/config.ts'
 import { discoverMcpCapabilities, safeMcpConfigSummary } from './mcp/capabilities.ts'
 import type { ConfigScope } from './mcp/configWrite.ts'
+import { PiJsonlSessionStore, piSessionTranscriptAdapter } from './kernel/pi/session.ts'
 import { SessionManager } from './session/SessionManager.ts'
 import { createGitWorkTreeTool } from './tools/index.ts'
 import { type PermissionMode, PERMISSION_MODES } from './permissions/index.ts'
@@ -14,11 +15,27 @@ import { GitWorkTreeSystem } from './git/index.ts'
 import { loadProjectInstructions } from './instructions/projectInstructions.ts'
 import { PluginManager } from './plugins/PluginManager.ts'
 import { GatewayClient } from './daemon/client.ts'
+import { LocalTuiSessionPort } from './tui/localSessionAdapter.ts'
+import { RuntimeTuiSessionPort } from './tui/runtimeSessionFacade.ts'
+import { LocalTuiPluginAdapter } from './tui/localPluginAdapter.ts'
+import { RuntimeTuiPluginFacade } from './tui/runtimePluginFacade.ts'
+import { RuntimeAgentFacade } from './tui/runtimeAgentFacade.ts'
+import { adaptLocalAgentForTui, adaptLocalModelForTui } from './tui/localAgentAdapter.ts'
+import { RuntimeModelFacade } from './tui/runtimeModelFacade.ts'
+import { LocalTuiMcpPort } from './tui/localMcpAdapter.ts'
+import { RuntimeTuiMcpPort } from './tui/runtimeMcpFacade.ts'
+import { LocalTuiInstructionsPort } from './tui/localInstructionsAdapter.ts'
+import { RuntimeTuiInstructionsFacade } from './tui/runtimeInstructionsFacade.ts'
+import { LocalTuiGitPort } from './tui/localGitAdapter.ts'
+import { RuntimeTuiGitPort } from './tui/runtimeGitFacade.ts'
+import { RuntimeClientSession } from './runtime/client.ts'
+import { ensureRuntimeService } from './daemon/runtime-service/lifecycle.ts'
 import { ensureGatewayDaemon, getGatewayStatus, rotateGatewayToken, showGatewayToken, stopGatewayDaemon } from './daemon/lifecycle.ts'
 import { runGatewayDaemon } from './daemon/run.ts'
 import { initializeTuiModelTransport } from './daemon/startup.ts'
 import { GATEWAY_PROTOCOL_VERSION } from './daemon/server.ts'
 import { configuredGatewayHost, setConfiguredGatewayHost } from './daemon/config.ts'
+import { buildPluginMentionContext } from './plugins/promptContext.ts'
 
 declare const MACRO: {
   VERSION: string
@@ -47,15 +64,14 @@ OPTIONS
   --thinking <LEVEL>      Set reasoning depth: off, minimal, low, medium, high, xhigh
   --permission <MODE>     Set approvals: interactive, auto-approve, or plan
   --permission-mode <MODE> Alias for --permission
-  --no-daemon             Use the in-process model runtime; do not connect to the gateway
+  --no-daemon             Run the Agent in this process instead of the Bun runtime service
   --gateway-port <PORT>   Override the gateway port for this invocation
   --gateway-host <HOST>   Override the gateway bind address (default: 127.0.0.1)
 
 MODEL GATEWAY
-  Normal startup uses the per-user gateway after a compatibility handshake. Its
-  default bind address is loopback; configure another address explicitly if needed.
-  If startup or handshake fails, Microcode reports the reason and uses the in-process
-  runtime for that invocation. The gateway remains available after the TUI exits.
+  Normal TUI startup uses a project-scoped Bun runtime service over authenticated
+  loopback HTTP. The separate Model Gateway remains available for compatible API clients.
+  The gateway default bind address is loopback; configure another address explicitly if needed.
   Run 'microcode gateway --help' for lifecycle, port, and security details.
 
 INTERACTIVE USE
@@ -67,9 +83,10 @@ CONFIGURATION
   Project settings: .microcode/config.json
   Gateway port:     MICROCODE_GATEWAY_PORT (default: 43127)
   Gateway address:  MICROCODE_GATEWAY_HOST (default: 127.0.0.1)
-  Provider auth:    /login and /auth in the TUI; provider API-key variables or API_KEY
-  Model selection:  MODEL, OPENAI_MODEL, ANTHROPIC_MODEL, GEMINI_MODEL
-  API endpoints:    BASE_URL or provider-specific base URL variables
+  Provider auth:    OpenAI Codex OAuth; OpenAI and DeepSeek API keys
+  API-key variables: OPENAI_API_KEY, DEEPSEEK_API_KEY
+  Model selection:  MODEL, OPENAI_MODEL, DEEPSEEK_MODEL
+  API endpoints:    BASE_URL or OPENAI_BASE_URL
   See 'microcode model list' and the README for provider and configuration details.
 
 EXAMPLES
@@ -123,6 +140,8 @@ API-COMPATIBLE ENDPOINTS
   POST /v1/chat/completions   OpenAI Chat Completions
   POST /v1/responses          OpenAI Responses
   POST /v1/messages           Anthropic Messages
+  POST /v1beta/models/{model}:generateContent        Gemini Generate Content
+  POST /v1beta/models/{model}:streamGenerateContent   Gemini streaming
 
   Provider sign-in and credentials are managed by Microcode. The gateway performs
   inference only; client harnesses retain their own tools, approvals, and sessions.
@@ -292,8 +311,9 @@ async function handleModelList(noDaemon = false, portOverride?: string, hostOver
     }
   }
   const all = gatewayClient ? [...gatewayClient.getProjectModels()] : getAllModels()
-  const customs = gatewayClient ? [] : getCustomModelDefs()
-  const customIds = new Set(customs.map((c) => c.id))
+  for (const diagnostic of getModelConfigDiagnostics(process.cwd())) {
+    console.warn('Warning: ' + diagnostic)
+  }
 
   if (all.length === 0) {
     console.log('No models available.')
@@ -309,15 +329,14 @@ async function handleModelList(noDaemon = false, portOverride?: string, hostOver
     if (providerModels.length === 0) continue
     console.log(`${provider.name} (${provider.id})${!gatewayClient && 'auth' in provider && provider.auth.oauth?.isSubscription ? ' · subscription OAuth' : ''}`)
     for (const m of providerModels) {
-      const isCustom = customIds.has(m.id) || String(m.provider).startsWith('custom:')
-      const source = gatewayClient ? '[gateway]' : isCustom ? '[custom]' : '[built-in]'
+      const source = gatewayClient ? '[gateway]' : '[built-in]'
       const keyInfo = gatewayClient
         ? ' (auth managed by gateway)'
-        : (m as any).apiKeyEnv
-          ? ` (key: $${(m as any).apiKeyEnv})`
-          : 'auth' in provider && provider.auth.oauth && !provider.auth.apiKey?.login
-            ? ' (OAuth: /login)'
-            : ` (key: ${m.api === 'openai-completions' ? '$OPENAI_API_KEY' : m.api === 'anthropic-messages' ? '$ANTHROPIC_API_KEY' : m.api === 'google-generative-ai' ? '$GEMINI_API_KEY' : '$API_KEY'})`
+        : provider.id === 'openai-codex'
+          ? ' (OAuth: /login)'
+          : provider.id === 'openai'
+            ? ' (key: $OPENAI_API_KEY)'
+            : ' (key: $DEEPSEEK_API_KEY)'
       const reasoning = m.reasoning ? ', reasoning' : ''
       const vision = m.input.includes('image') ? ', vision' : ''
 
@@ -326,6 +345,42 @@ async function handleModelList(noDaemon = false, portOverride?: string, hostOver
       console.log(`    context: ${m.contextWindow.toLocaleString()}, max tokens: ${m.maxTokens.toLocaleString()}${reasoning}${vision}${keyInfo}`)
       console.log()
     }
+  }
+}
+
+function createGatewayBindControl(
+  gatewayClient: GatewayClient | undefined,
+  gatewayPortOverride?: string,
+  gatewayHostOverride?: string,
+) {
+  if (!gatewayClient) return undefined
+  let activeGatewayHost = gatewayClient.bindHost
+  return {
+    getBindHost: () => activeGatewayHost ?? configuredGatewayHost(gatewayHostOverride),
+    setBindHost: async (host: string) => {
+      const previousHost = activeGatewayHost ?? configuredGatewayHost(gatewayHostOverride)
+      if (host === previousHost) return
+      await setConfiguredGatewayHost(host)
+      try {
+        await stopGatewayDaemon()
+        const connection = await ensureGatewayDaemon(gatewayPortOverride, host)
+        await new GatewayClient(connection).handshake()
+        gatewayClient.setConnection(connection)
+        activeGatewayHost = host
+      } catch (error) {
+        await stopGatewayDaemon().catch(() => undefined)
+        await setConfiguredGatewayHost(previousHost)
+        try {
+          const restored = await ensureGatewayDaemon(gatewayPortOverride, previousHost)
+          await new GatewayClient(restored).handshake()
+          gatewayClient.setConnection(restored)
+          activeGatewayHost = previousHost
+        } catch (restoreError) {
+          throw new Error(`${error instanceof Error ? error.message : String(error)}; restoring the previous gateway address also failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
+        }
+        throw error
+      }
+    },
   }
 }
 
@@ -420,16 +475,13 @@ export async function main(): Promise<void> {
       }
     } else {
       gatewayStartupMessage = {
-        message: `Model Gateway handshake failed: ${transport.reason.replace(/[.]+$/, '')}. Falling back to --no-daemon mode for this session (in-process model path).`,
+        message: `Model Gateway handshake failed: ${transport.reason.replace(/[.]+$/, '')}. The Agent runtime can still use the configured direct provider integration.`,
         kind: 'error',
       }
     }
   }
 
   const cwd = process.cwd()
-  const pluginManager = await PluginManager.create(cwd, MACRO.VERSION)
-  const pluginSnapshot = pluginManager.getSnapshot()
-  const projectInstructions = await loadProjectInstructions(cwd)
   const resumeFlagIdx = args.indexOf('--resume')
   const resumeFlag = resumeFlagIdx !== -1
   // Session ID is the arg after --resume, if it exists and isn't another flag
@@ -483,8 +535,86 @@ export async function main(): Promise<void> {
     }
   }
 
+  if (!args.includes('--no-daemon')) {
+    let runtimeConnection
+    try {
+      runtimeConnection = await ensureRuntimeService(cwd, {
+        ...(resumeSessionId ? { resumeSessionId } : {}),
+        ...(resumeFlag && !resumeSessionId ? { resumeLatest: true } : {}),
+        ...(modelId ? { modelId } : {}),
+        ...(permissionMode ? { permissionMode } : {}),
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+      })
+    } catch (error) {
+      console.error(`Could not start the Bun runtime service: ${error instanceof Error ? error.message : String(error)}`)
+      process.exitCode = 1
+      return
+    }
+    const runtimeSession = new RuntimeClientSession(runtimeConnection.client, runtimeConnection.sessionId)
+    let initialSnapshot
+    try {
+      initialSnapshot = await runtimeSession.start()
+      if (modelId) {
+        const slash = modelId.indexOf('/')
+        await runtimeSession.sendCommand('model.select', {
+          model_id: slash > 0 ? modelId.slice(slash + 1) : modelId,
+          ...(slash > 0 ? { provider_id: modelId.slice(0, slash) } : {}),
+        })
+      }
+      if (permissionMode) await runtimeSession.sendCommand('permission.set', { mode: permissionMode })
+      if (thinkingLevel) await runtimeSession.sendCommand('thinking.set', { level: thinkingLevel })
+    } catch (error) {
+      await runtimeSession.close().catch(() => undefined)
+      console.error(`Could not connect to the Bun runtime service: ${error instanceof Error ? error.message : String(error)}`)
+      process.exitCode = 1
+      return
+    }
+
+    const remoteAgent = new RuntimeAgentFacade(runtimeSession)
+    const remoteModel = new RuntimeModelFacade(runtimeSession)
+    const remoteMcp = new RuntimeTuiMcpPort(runtimeSession, remoteAgent)
+    const remoteInstructions = new RuntimeTuiInstructionsFacade(runtimeSession, remoteAgent)
+    const remoteGit = new RuntimeTuiGitPort(runtimeSession)
+    const remoteSessions = new RuntimeTuiSessionPort(runtimeSession, remoteAgent)
+    const remotePlugins = new RuntimeTuiPluginFacade(runtimeSession)
+    const gatewayBindControl = createGatewayBindControl(gatewayClient, gatewayPortOverride, gatewayHostOverride)
+    const app = new App(remoteAgent, remoteModel, remoteMcp, remoteInstructions, remoteGit, remoteSessions, gatewayBindControl)
+    app.addStartupMessage(`Bun runtime connected (protocol ${runtimeConnection.metadata.protocolVersion}).`, 'success')
+    if (gatewayStartupMessage) app.addStartupMessage(gatewayStartupMessage.message, gatewayStartupMessage.kind)
+    for (const diagnostic of initialSnapshot.capabilities.diagnostics) app.addStartupWarning(diagnostic)
+    app.setPluginPort(remotePlugins, async () => undefined)
+    remoteAgent.setPermissionRequestHandler((toolName, input, description, requestId, preview) => app.promptPermission(toolName, input, description, requestId, preview))
+    remoteAgent.setAskUserQuestionHandler((toolName, input) => app.promptAskUserQuestion(toolName, input))
+
+    let closingRuntimeClient = false
+    const closeRuntimeClient = async () => {
+      if (closingRuntimeClient) return
+      closingRuntimeClient = true
+      const sessionId = remoteSessions.getSessionId()
+      await remoteModel.dispose().catch(() => undefined)
+      remoteAgent.dispose()
+      await remoteSessions.close().catch(() => undefined)
+      app.stop()
+      if (sessionId) console.log(`\nResume this session with: microcode --resume ${sessionId.slice(0, 8)}`)
+      cleanupImageCache(sessionId ?? '')
+      process.exit(0)
+    }
+    app.onExit = closeRuntimeClient
+    process.once('SIGINT', () => { void closeRuntimeClient() })
+    process.once('SIGTERM', () => { void closeRuntimeClient() })
+    await app.run()
+    return
+  }
+
+  const pluginManager = await PluginManager.create(cwd, MACRO.VERSION)
+  const pluginSnapshot = pluginManager.getSnapshot()
+  const projectInstructions = await loadProjectInstructions(cwd)
+
   // Create session manager
-  const sessionManager = new SessionManager()
+  const sessionManager = new SessionManager({
+    store: new PiJsonlSessionStore(),
+    transcript: piSessionTranscriptAdapter,
+  })
 
   // Resume or create session
   let restoredMessages: AgentMessage[] | null = null
@@ -530,6 +660,7 @@ export async function main(): Promise<void> {
     permission: { mode: permissionMode },
     pluginSkills: [...pluginSnapshot.skills],
     pluginDiagnostics: [...pluginSnapshot.diagnostics, ...pluginSnapshot.plugins.flatMap((plugin) => plugin.diagnostics.map((diagnostic) => `${plugin.name}: ${diagnostic}`))],
+    pluginPromptContext: (input, scanText) => buildPluginMentionContext(input, pluginManager.getPlugins(), scanText),
     persistence: sessionManager,
     identity: {
       id: `assistant-${sessionManager.getSessionId() ?? 'session'}`,
@@ -549,44 +680,19 @@ export async function main(): Promise<void> {
     agent.replaceMessages(restoredMessages, 'rebuild')
   }
 
-  agent.addTools([createGitWorkTreeTool(() => GitWorkTreeSystem.open(cwd))])
+  agent.addTools([createGitWorkTreeTool(() => GitWorkTreeSystem.open(cwd))], { enabled: false })
 
   // Create TUI app (REPL starts immediately)
-  let activeGatewayHost = gatewayClient?.bindHost
-  const gatewayBindControl = gatewayClient ? {
-    getBindHost: () => activeGatewayHost ?? configuredGatewayHost(gatewayHostOverride),
-    setBindHost: async (host: string) => {
-      const previousHost = activeGatewayHost ?? configuredGatewayHost(gatewayHostOverride)
-      if (host === previousHost) return
-      await setConfiguredGatewayHost(host)
-      try {
-        await stopGatewayDaemon()
-        const connection = await ensureGatewayDaemon(gatewayPortOverride, host)
-        await new GatewayClient(connection).handshake()
-        gatewayClient!.setConnection(connection)
-        activeGatewayHost = host
-      } catch (error) {
-        await stopGatewayDaemon().catch(() => undefined)
-        await setConfiguredGatewayHost(previousHost)
-        try {
-          const restored = await ensureGatewayDaemon(gatewayPortOverride, previousHost)
-          await new GatewayClient(restored).handshake()
-          gatewayClient!.setConnection(restored)
-          activeGatewayHost = previousHost
-        } catch (restoreError) {
-          throw new Error(`${error instanceof Error ? error.message : String(error)}; restoring the previous gateway address also failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
-        }
-        throw error
-      }
-    },
-  } : undefined
-  const app = new App(agent, mcpClient, sessionManager, gatewayClient
-    ? (model, context, options) => gatewayClient!.completeSimple(model, context, options)
-    : undefined, gatewayClient, gatewayClient, gatewayBindControl)
+  const gatewayBindControl = createGatewayBindControl(gatewayClient, gatewayPortOverride, gatewayHostOverride)
+  const localMcpPort = new LocalTuiMcpPort(mcpClient, agent, cwd)
+  const localInstructions = new LocalTuiInstructionsPort(agent, cwd)
+  const localGit = new LocalTuiGitPort(cwd)
+  const app = new App(adaptLocalAgentForTui(agent), adaptLocalModelForTui(agent), localMcpPort, localInstructions, localGit, new LocalTuiSessionPort(sessionManager, (messages) => agent.replaceMessages(messages, 'rebuild')), gatewayBindControl)
   if (gatewayStartupMessage) app.addStartupMessage(gatewayStartupMessage.message, gatewayStartupMessage.kind)
+  for (const diagnostic of getModelConfigDiagnostics(cwd)) app.addStartupWarning(diagnostic)
   const activeMcpServerNames = new Set<string>()
-  app.setPluginManager(pluginManager, async (updatedSnapshot) => {
-    const snapshot = updatedSnapshot ?? await pluginManager.refresh(MACRO.VERSION)
+  app.setPluginPort(new LocalTuiPluginAdapter(pluginManager, MACRO.VERSION), async () => {
+    const snapshot = pluginManager.getSnapshot()
     const standaloneRegistry = await discoverMcpCapabilities(cwd)
     const standalone = standaloneRegistry.configs
     const desired = { ...standalone }
@@ -618,7 +724,7 @@ export async function main(): Promise<void> {
       activeMcpServerNames.add(name)
     }))
     agent.setPluginSkills([...snapshot.skills], [...snapshot.diagnostics, ...snapshot.plugins.flatMap((plugin) => plugin.diagnostics.map((diagnostic) => `${plugin.name}: ${diagnostic}`))])
-    app.updateMcpState(mcpClient)
+    localMcpPort.applyClientState()
     for (const warning of collisions) app.addStartupWarning(warning)
     for (const warning of standaloneRegistry.diagnostics) app.addStartupWarning(warning)
   })
@@ -631,7 +737,7 @@ export async function main(): Promise<void> {
 
   // Wire permission prompt to TUI (own tool calls)
   agent.setPermissionRequestHandler(
-    (toolName, input, description) => app.promptPermission(toolName, input, description),
+    (toolName, input, description, requestId, preview) => app.promptPermission(toolName, input, description, requestId, preview),
   )
   // Wire ask_user_question interactive handler to TUI
   agent.setAskUserQuestionHandler(
@@ -670,13 +776,13 @@ export async function main(): Promise<void> {
   if (!isMcpConfigEmpty(combinedMcpConfigs)) {
     void mcpClient.connectAll(combinedMcpConfigs).then(() => {
       // Rebuild system prompt with MCP info and deferred tool names
-      app.updateMcpState(mcpClient)
+      localMcpPort.applyClientState()
 
       // Notify user in chat
-      app.showMcpReady(mcpClient.getServerStates())
+      app.showMcpReady(localMcpPort.getReadyStates())
     })
   } else {
-    app.updateMcpState(mcpClient)
+    localMcpPort.applyClientState()
   }
 
   // Handle graceful shutdown

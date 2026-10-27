@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { Type } from 'typebox'
 import type { ToolDefinition } from '../registry.ts'
 
@@ -136,7 +136,7 @@ function formatToolSchema(def: ToolDefinition): string {
  * a query (keyword or `select:ToolName`). The tool returns the matched
  * tools' schemas and triggers injection into the agent's tool list.
  */
-export function createToolSearchTool(options: ToolSearchToolOptions): AgentTool {
+export function createToolSearchTool(options: ToolSearchToolOptions): ToolAdapter {
   const { getDeferredTools, onToolsDiscovered } = options
   const lastDiscoveredAt = new Map<string, number>()
   const notifyDiscovered = (names: string[]): void => {
@@ -165,7 +165,7 @@ export function createToolSearchTool(options: ToolSearchToolOptions): AgentTool 
     async execute(
       _toolCallId: string,
       params: unknown,
-    ): Promise<AgentToolResult<any>> {
+    ): Promise<ToolExecutionResult<any>> {
       const { query, max_results = 5 } = params as { query: string; max_results?: number }
       const deferredTools = getDeferredTools()
 

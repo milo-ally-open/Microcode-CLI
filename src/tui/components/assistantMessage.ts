@@ -1,7 +1,11 @@
 import { Container, type MarkdownTheme } from '@earendil-works/pi-tui'
-import type { AssistantMessage } from '@earendil-works/pi-ai'
 import { getMarkdownTheme, theme } from '../theme.ts'
 import { MarkedMarkdown } from './markedMarkdown.ts'
+
+export interface AssistantDisplayBlock {
+  readonly type: string
+  readonly text?: string
+}
 
 /**
  * Component that renders user-visible assistant text; thinking stays out of transcript rows.
@@ -18,16 +22,15 @@ export class AssistantMessageComponent extends Container {
     this.markdownTheme = markdownTheme
   }
 
-  updateContent(message: AssistantMessage): void {
-    const blocks = message.content
+  updateContent(blocks: readonly AssistantDisplayBlock[]): void {
     const textBlocks = blocks.filter((c) => c.type === 'text')
-    const text = textBlocks.map((c) => c.text).join('')
+    const text = textBlocks.map((c) => c.text ?? '').join('')
 
     // Build a signature that captures block types and whether text blocks have content.
     // This ensures we rebuild when a text block transitions from empty to non-empty
     // (e.g. when thinking finishes and the answer starts streaming).
     const signature = blocks
-      .map((b) => b.type === 'text' ? `text:${b.text.length > 0 ? '1' : '0'}` : b.type)
+      .map((b) => b.type === 'text' ? `text:${(b.text ?? '').length > 0 ? '1' : '0'}` : b.type)
       .join(',')
 
     if (signature !== this.lastBlockSignature) {
@@ -37,7 +40,7 @@ export class AssistantMessageComponent extends Container {
       for (const block of blocks) {
         if (block.type === 'text') {
           const md = new MarkedMarkdown(
-            block.text.trim() ? block.text : ' ',
+            (block.text ?? '').trim() ? block.text ?? '' : ' ',
             theme.fg('muted', '• '),
             0,
             this.markdownTheme,
@@ -57,7 +60,8 @@ export class AssistantMessageComponent extends Container {
       const lastTextComponent = this.textComponents.at(-1)
 
       if (lastTextBlock?.type === 'text' && lastTextComponent) {
-        lastTextComponent.setText(lastTextBlock.text.trim() ? lastTextBlock.text : ' ')
+        const value = lastTextBlock.text ?? ''
+        lastTextComponent.setText(value.trim() ? value : ' ')
       }
 
       this.lastText = text

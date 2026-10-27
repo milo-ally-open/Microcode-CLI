@@ -5,24 +5,115 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { Type } from 'typebox'
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai'
-import { AgentModelManager, resolveAgentModelConfig } from '../../src/agent/AgentModelManager.ts'
+import { AgentModelManager } from '../../src/agent/AgentModelManager.ts'
+import { resolveAgentModelApiKey, resolveAgentModelConfig } from '../../src/models/agentResolver.ts'
 import { AgentSkillManager } from '../../src/agent/AgentSkillManager.ts'
 import { AgentTokenTracker } from '../../src/agent/AgentTokenTracker.ts'
-import { MicrocodeAgent } from '../../src/agent/MicrocodeAgent.ts'
+import { createMicrocodeAgentRuntime, type PiMicrocodeAgent } from '../../src/agent/index.ts'
 import { ensureBootstrapMacro } from '../../src/macro.ts'
 
 describe('agent modules', () => {
+  test('Agent runtime expands skill and plugin mentions before every model request', async () => {
+    ensureBootstrapMacro()
+    const cwd = mkdtempSync(join(tmpdir(), 'microcode-agent-mentions-'))
+    try {
+      const skillsDir = join(cwd, 'skills', 'alpha')
+      await mkdir(skillsDir, { recursive: true })
+      await writeFile(join(skillsDir, 'SKILL.md'), '---\nname: alpha\ndescription: Alpha skill\n---\nAlpha skill body.\n')
+      let observedPrompt = ''
+      const agent = createMicrocodeAgentRuntime({
+        cwd,
+        modelId: 'deepseek-v4-pro',
+        api: 'openai-completions',
+        skillPaths: [join(cwd, 'skills')],
+        compactionSettings: { enabled: false },
+        pluginPromptContext: (input, scanText) => scanText.includes('#demo')
+          ? `${input}\n\n[Referenced plugins]\nDemo plugin body.`
+          : input,
+        streamFn: (model, context) => {
+          observedPrompt = context.messages.map((message: any) =>
+            typeof message.content === 'string'
+              ? message.content
+              : message.content?.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('\n') ?? '',
+          ).join('\n')
+          const message: any = {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Done.' }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 1,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 2,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: 'stop',
+            timestamp: Date.now(),
+          }
+          const stream = createAssistantMessageEventStream()
+          stream.push({ type: 'start', partial: message })
+          stream.push({ type: 'done', reason: 'stop', message })
+          return stream
+        },
+      })
+
+      await agent.prompt('Use $alpha while working with #demo.')
+
+      expect(observedPrompt).toContain('Use $alpha while working with #demo.')
+      expect(observedPrompt).toContain('Alpha skill body.')
+      expect(observedPrompt).toContain('Demo plugin body.')
+      expect(JSON.stringify(agent.getMessages())).toContain('Demo plugin body.')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('permission callbacks receive the request ID emitted to runtime listeners', async () => {
+    ensureBootstrapMacro()
+    let callbackRequestId = ''
+    let eventRequestId = ''
+    const agent = createMicrocodeAgentRuntime({
+      cwd: process.cwd(),
+      modelId: 'deepseek-v4-pro',
+      api: 'openai-completions',
+      permission: {
+        onPermissionRequest: async (_tool, _input, _description, requestId) => {
+          callbackRequestId = requestId
+          return true
+        },
+      },
+    })
+    const unsubscribe = agent.subscribe((event) => {
+      if (event.type === 'permission_requested') eventRequestId = event.request.requestId
+    })
+    try {
+      expect(await agent.requestToolPermission('bash', { command: 'pwd' }, 'Run a command')).toBe(true)
+      expect(callbackRequestId).toBe(eventRequestId)
+      expect(callbackRequestId).toMatch(/^[0-9a-f-]{36}$/i)
+    } finally {
+      unsubscribe()
+    }
+  })
+
   test('model manager resolves, commits, snapshots, and tracks thinking level', () => {
     const initial = resolveAgentModelConfig('deepseek-v4-pro', 'openai-completions')
-    const manager = new AgentModelManager({ ...initial, thinkingLevel: 'low' })
+    const manager = new AgentModelManager({
+      ...initial,
+      thinkingLevel: 'low',
+      resolveModelConfig: resolveAgentModelConfig,
+      resolveApiKey: resolveAgentModelApiKey,
+    })
 
-    const next = manager.resolve('gemini-2.5-flash', 'google-generative-ai')
+    const next = manager.resolve('deepseek-flash', 'openai-completions')
     manager.commit(next)
     manager.setThinkingLevel('high')
 
     const snapshot = manager.getSnapshot()
-    expect(manager.getModel().id).toBe('gemini-2.5-flash')
-    expect(manager.getProvider()).toBe('google')
+    expect(manager.getModel().id).toBe('deepseek-flash')
+    expect(manager.getProvider()).toBe('deepseek')
     expect(snapshot.thinkingLevel).toBe('high')
     expect(() => ((snapshot as any).provider = 'mutated')).toThrow()
   })
@@ -134,13 +225,13 @@ describe('agent modules', () => {
     let summaryCalls = 0
     let requestCount = 0
     const observedContexts: string[] = []
-    const agent = new MicrocodeAgent({
+    const agent = createMicrocodeAgentRuntime({
       cwd: process.cwd(),
       modelId: 'deepseek-v4-pro',
       api: 'openai-completions',
       permission: { mode: 'auto-approve' },
       compactionSettings: { reserveTokens: model.contextWindow - compactAtTokens },
-      generateSummaryFn: async () => {
+      summarize: async () => {
         summaryCalls++
         return { ok: true, value: 'Earlier work summary.' } as any
       },
@@ -221,17 +312,17 @@ describe('agent modules', () => {
   test('a restored context above 100% forces compaction before the first model request', async () => {
     ensureBootstrapMacro()
     const model = resolveAgentModelConfig('gpt-5.6-luna', 'openai-codex-responses').model
-    let agent!: MicrocodeAgent
+    let agent!: PiMicrocodeAgent
     let summaryCalls = 0
     let promptWasPresentWhenSummarizing = true
     const observedContexts: string[] = []
-    agent = new MicrocodeAgent({
+    agent = createMicrocodeAgentRuntime({
       cwd: process.cwd(),
       modelId: 'gpt-5.6-luna',
       api: 'openai-codex-responses',
       permission: { mode: 'auto-approve' },
       compactionSettings: { enabled: false },
-      generateSummaryFn: async () => {
+      summarize: async () => {
         summaryCalls++
         promptWasPresentWhenSummarizing = agent.getMessages().some((message: any) =>
           message.role === 'user' && message.content?.includes('Resume over budget session.'),
@@ -300,12 +391,12 @@ describe('agent modules', () => {
     ensureBootstrapMacro()
     const model = resolveAgentModelConfig('gpt-5.6-luna', 'openai-codex-responses').model
     let summaryCalls = 0
-    const agent = new MicrocodeAgent({
+    const agent = createMicrocodeAgentRuntime({
       cwd: process.cwd(),
       modelId: 'gpt-5.6-luna',
       api: 'openai-codex-responses',
       compactionSettings: { enabled: false },
-      generateSummaryFn: async () => {
+      summarize: async () => {
         summaryCalls++
         return { ok: true, value: 'Summarized old tool activity.' } as any
       },

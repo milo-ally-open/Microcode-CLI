@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createConnection } from 'node:net'
-import type { AssistantMessage, AssistantMessageEvent, Context, Model } from '@earendil-works/pi-ai'
+import type { AssistantMessageEvent as PiAssistantMessageEvent, Model } from '@earendil-works/pi-ai'
 import { getAllModels } from '../../src/models/index.ts'
-import { parseResponsesRequest, serializeResponses } from '../../src/daemon/protocol.ts'
+import type { ModelCompletion, ModelInferenceContext, ModelRuntimeDescriptor, ModelStreamEvent } from '../../src/models/inference.ts'
+import { parseGeminiRequest, parseResponsesRequest, serializeGemini, serializeResponses } from '../../src/daemon/protocol.ts'
 import { createGatewayServer } from '../../src/daemon/server.ts'
 import { GatewayClient } from '../../src/daemon/client.ts'
-import { openAiChatEvents, responsesEvents } from '../../src/daemon/streaming.ts'
+import { geminiEvents, openAiChatEvents, responsesEvents } from '../../src/daemon/streaming.ts'
 import { initializeTuiModelTransport } from '../../src/daemon/startup.ts'
 import type { GatewayModelRuntime, GatewayRequestOptions, GatewayServerHandle } from '../../src/daemon/types.ts'
 import { configureLoopbackProxyBypass } from '../../src/daemon/proxy.ts'
@@ -16,13 +17,12 @@ const TOKEN = 'gateway-test-token'
 const RPC_TOKEN = 'gateway-private-rpc-token'
 const model = getAllModels().find((item) => item.provider === 'deepseek' && item.id === 'deepseek-v4-pro')!
 
-function assistantMessage(text = 'gateway reply'): AssistantMessage {
+function assistantMessage(text = 'gateway reply'): ModelCompletion {
   return {
-    role: 'assistant',
     content: [{ type: 'text', text }],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
+    apiId: model.api,
+    providerId: String(model.provider),
+    modelId: model.id,
     usage: { input: 11, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 14, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason: 'stop',
     timestamp: 1_700_000_000_000,
@@ -30,19 +30,19 @@ function assistantMessage(text = 'gateway reply'): AssistantMessage {
   }
 }
 
-function messageEvents(message = assistantMessage()): AssistantMessageEvent[] {
+function messageEvents(message = assistantMessage()): ModelStreamEvent[] {
   return [
     { type: 'start', partial: message },
     { type: 'text_start', contentIndex: 0, partial: message },
-    { type: 'text_delta', contentIndex: 0, delta: 'gateway ' },
-    { type: 'text_delta', contentIndex: 0, delta: 'reply' },
+    { type: 'text_delta', contentIndex: 0, delta: 'gateway ', partial: message },
+    { type: 'text_delta', contentIndex: 0, delta: 'reply', partial: message },
     { type: 'text_end', contentIndex: 0, content: 'gateway reply', partial: message },
     { type: 'done', reason: 'stop', message },
-  ] as AssistantMessageEvent[]
+  ] as ModelStreamEvent[]
 }
 
 function createRuntime(overrides: Partial<GatewayModelRuntime> = {}) {
-  const calls: Array<{ model: Model<any>; context: Context; options: GatewayRequestOptions & { signal?: AbortSignal } }> = []
+  const calls: Array<{ model: ModelRuntimeDescriptor; context: ModelInferenceContext; options: GatewayRequestOptions & { signal?: AbortSignal } }> = []
   const runtime: GatewayModelRuntime = {
     getModels: () => [model],
     getCurrentModel: () => model,
@@ -158,15 +158,76 @@ describe('Model Gateway HTTP and protocol contracts', () => {
     expect(runtimeState.calls[0]?.context.messages.map((entry) => entry.role)).toEqual(['system', 'user'])
   })
 
+  test('accepts Gemini GenerateContent requests and maps functions and generation settings', async () => {
+    const response = await post(`/v1beta/models/${model.provider}/${model.id}:generateContent`, {
+      systemInstruction: { parts: [{ text: 'Be concise.' }] },
+      contents: [
+        { role: 'user', parts: [{ text: 'Look this up.' }] },
+        { role: 'model', parts: [{ functionCall: { id: 'call_lookup', name: 'lookup', args: { key: 'value' } } }] },
+        { role: 'user', parts: [{ functionResponse: { id: 'call_lookup', name: 'lookup', response: { result: 'found' } } }] },
+      ],
+      tools: [{ functionDeclarations: [{ name: 'lookup', description: 'Look up a value.', parameters: { type: 'object', properties: { key: { type: 'string' } } } }] }],
+      toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+      generationConfig: { maxOutputTokens: 40, temperature: 0.4, topP: 0.8, topK: 10, stopSequences: ['DONE'] },
+    }, { 'x-goog-api-key': TOKEN })
+
+    expect(response.status).toBe(200)
+    const body = await response.json() as any
+    expect(body.candidates[0]).toMatchObject({ index: 0, content: { role: 'model', parts: [{ text: 'gateway reply' }] }, finishReason: 'STOP' })
+    expect(body.usageMetadata).toEqual({ promptTokenCount: 11, candidatesTokenCount: 3, totalTokenCount: 14 })
+    expect(runtimeState.calls[0]?.context.messages.map((entry) => entry.role)).toEqual(['system', 'user', 'assistant', 'tool_result'])
+    expect(runtimeState.calls[0]?.context.tools?.[0]?.name).toBe('lookup')
+    expect(runtimeState.calls[0]?.options).toMatchObject({ maxTokens: 40, temperature: 0.4, samplingParams: { top_p: 0.8, top_k: 10, stop: ['DONE'] } })
+
+    const noAuth = await post(`/v1beta/models/${model.provider}/${model.id}:generateContent`, {
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    })
+    expect(noAuth.status).toBe(401)
+    expect(await noAuth.json()).toMatchObject({ error: { status: 'UNAUTHENTICATED' } })
+  })
+
+  test('rejects unsupported Gemini request features instead of silently dropping them', async () => {
+    expect(() => parseGeminiRequest({
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { responseMimeType: 'application/json' },
+    }, `${model.provider}/${model.id}`)).toThrow('responseMimeType')
+
+    const response = await post(`/v1beta/models/${model.provider}/${model.id}:generateContent`, {
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { responseMimeType: 'application/json' },
+    }, { 'x-goog-api-key': TOKEN })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: { status: 'INVALID_ARGUMENT' } })
+    expect(runtimeState.calls).toHaveLength(0)
+  })
+
+  test('Gemini streaming uses GenerateContentResponse SSE chunks and function-call serialization', async () => {
+    const response = await post(`/v1beta/models/${model.provider}/${model.id}:streamGenerateContent?alt=sse`, {
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    }, { 'x-goog-api-key': TOKEN })
+    const streamText = await response.text()
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(streamText).toContain('data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"gateway "}]}}]}')
+    expect(streamText).toContain('"finishReason":"STOP"')
+    expect(streamText).not.toContain('[DONE]')
+
+    const call = { ...assistantMessage(), content: [{ type: 'tool_call', id: 'call_gemini', name: 'lookup', arguments: { key: 'value' } }], stopReason: 'toolUse' } as ModelCompletion
+    expect(serializeGemini(call, model).candidates[0]).toMatchObject({ content: { parts: [{ functionCall: { id: 'call_gemini', name: 'lookup', args: { key: 'value' } } }] }, finishReason: 'STOP' })
+    const frames = []
+    for await (const frame of geminiEvents(messageEvents(), model)) frames.push(frame)
+    expect(JSON.stringify(frames)).toContain('"totalTokenCount":14')
+  })
+
   test('Anthropic adaptive thinking display never leaks hidden text and preserves its signature', async () => {
     const privateThinking = 'private reasoning text'
     const thinkingMessage = {
       ...assistantMessage(),
       content: [
-        { type: 'thinking', thinking: privateThinking, thinkingSignature: 'opaque-signature' },
+        { type: 'thinking', text: privateThinking, signature: 'opaque-signature' },
         { type: 'text', text: 'final answer' },
       ],
-    } as AssistantMessage
+    } as ModelCompletion
     const thinkingRuntime = createRuntime({
       async *stream() {
         yield { type: 'start', partial: thinkingMessage }
@@ -225,9 +286,9 @@ describe('Model Gateway HTTP and protocol contracts', () => {
     const privateThinking = 'internal reasoning that is not a Chat Completions response field'
     const message = {
       ...assistantMessage('public answer'),
-      content: [{ type: 'thinking', thinking: privateThinking }, { type: 'text', text: 'public answer' }],
-    } as AssistantMessage
-    const events: AssistantMessageEvent[] = [
+      content: [{ type: 'thinking', text: privateThinking }, { type: 'text', text: 'public answer' }],
+    } as ModelCompletion
+    const events: ModelStreamEvent[] = [
       { type: 'start', partial: message },
       { type: 'thinking_start', contentIndex: 0, partial: message },
       { type: 'thinking_delta', contentIndex: 0, delta: privateThinking, partial: message },
@@ -262,8 +323,8 @@ describe('Model Gateway HTTP and protocol contracts', () => {
     const summaryText = 'A concise, user-facing reasoning summary.'
     const thinkingMessage = {
       ...assistantMessage('final answer'),
-      content: [{ type: 'thinking', thinking: summaryText }, { type: 'text', text: 'final answer' }],
-    } as AssistantMessage
+      content: [{ type: 'thinking', text: summaryText }, { type: 'text', text: 'final answer' }],
+    } as ModelCompletion
 
     const defaultOutput = serializeResponses(thinkingMessage, model)
     expect(JSON.stringify(defaultOutput)).not.toContain(summaryText)
@@ -318,9 +379,9 @@ describe('Model Gateway HTTP and protocol contracts', () => {
     const summary = 'A safe summary.'
     const thinkingMessage = {
       ...assistantMessage('answer'),
-      content: [{ type: 'thinking', thinking: summary }, { type: 'text', text: 'answer' }],
-    } as AssistantMessage
-    const events: AssistantMessageEvent[] = [
+      content: [{ type: 'thinking', text: summary }, { type: 'text', text: 'answer' }],
+    } as ModelCompletion
+    const events: ModelStreamEvent[] = [
       { type: 'start', partial: thinkingMessage },
       { type: 'thinking_start', contentIndex: 0, partial: thinkingMessage },
       { type: 'thinking_delta', contentIndex: 0, delta: summary, partial: thinkingMessage },
@@ -350,8 +411,8 @@ describe('Model Gateway HTTP and protocol contracts', () => {
 
   test('Responses function call item IDs differ from call IDs and round-trip tool results by call_id', async () => {
     const callId = 'call_pi-runtime-id'
-    const call = { type: 'toolCall', id: callId, name: 'lookup', arguments: { key: 'value' } } as const
-    const message = { ...assistantMessage(), content: [call], stopReason: 'toolUse' } as AssistantMessage
+    const call = { type: 'tool_call', id: callId, name: 'lookup', arguments: { key: 'value' } } as const
+    const message = { ...assistantMessage(), content: [call], stopReason: 'toolUse' } as ModelCompletion
     const response = serializeResponses(message, model)
     const item = response.output[0] as Record<string, unknown>
 
@@ -363,8 +424,8 @@ describe('Model Gateway HTTP and protocol contracts', () => {
       model: `${model.provider}/${model.id}`,
       input: [item, { type: 'function_call_output', call_id: callId, output: 'result' }],
     })
-    expect(nextRequest.context.messages[0]).toMatchObject({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: 'lookup' }] })
-    expect(nextRequest.context.messages[1]).toMatchObject({ role: 'toolResult', toolCallId: callId, toolName: 'lookup' })
+    expect(nextRequest.context.messages[0]).toMatchObject({ role: 'assistant', content: [{ type: 'tool_call', id: callId, name: 'lookup' }] })
+    expect(nextRequest.context.messages[1]).toMatchObject({ role: 'tool_result', toolCallId: callId, toolName: 'lookup' })
   })
 
   test('Responses namespace tools and Codex client metadata round-trip without losing namespace identity', async () => {
@@ -387,10 +448,10 @@ describe('Model Gateway HTTP and protocol contracts', () => {
 
     expect(parsed.context.tools?.map((tool) => tool.name)).toEqual(['multi_agent_v1__spawn_agent'])
     expect(parsed.responsesToolNamespaces?.get('multi_agent_v1__spawn_agent')).toEqual({ namespace: 'multi_agent_v1', name: 'spawn_agent' })
-    expect(parsed.context.messages[0]).toMatchObject({ role: 'assistant', content: [{ type: 'toolCall', id: 'call_ns', name: 'multi_agent_v1__spawn_agent' }] })
-    expect(parsed.context.messages[1]).toMatchObject({ role: 'toolResult', toolCallId: 'call_ns', toolName: 'multi_agent_v1__spawn_agent' })
+    expect(parsed.context.messages[0]).toMatchObject({ role: 'assistant', content: [{ type: 'tool_call', id: 'call_ns', name: 'multi_agent_v1__spawn_agent' }] })
+    expect(parsed.context.messages[1]).toMatchObject({ role: 'tool_result', toolCallId: 'call_ns', toolName: 'multi_agent_v1__spawn_agent' })
 
-    const toolMessage = { ...assistantMessage(), content: [{ type: 'toolCall', id: 'call_out', name: 'multi_agent_v1__spawn_agent', arguments: { task: 'check' } }], stopReason: 'toolUse' } as AssistantMessage
+    const toolMessage = { ...assistantMessage(), content: [{ type: 'tool_call', id: 'call_out', name: 'multi_agent_v1__spawn_agent', arguments: { task: 'check' } }], stopReason: 'toolUse' } as ModelCompletion
     expect(serializeResponses(toolMessage, model, false, parsed.responsesToolNamespaces).output[0]).toMatchObject({
       type: 'function_call', call_id: 'call_out', namespace: 'multi_agent_v1', name: 'spawn_agent',
     })
@@ -426,9 +487,9 @@ describe('Model Gateway HTTP and protocol contracts', () => {
   })
 
   test('Responses streaming function-call item references use item_id while call_id remains stable', async () => {
-    const call = { type: 'toolCall', id: 'call_stream-id', name: 'lookup', arguments: { key: 'value' } } as const
-    const message = { ...assistantMessage(), content: [call], stopReason: 'toolUse' } as AssistantMessage
-    const events: AssistantMessageEvent[] = [
+    const call = { type: 'tool_call', id: 'call_stream-id', name: 'lookup', arguments: { key: 'value' } } as const
+    const message = { ...assistantMessage(), content: [call], stopReason: 'toolUse' } as ModelCompletion
+    const events: ModelStreamEvent[] = [
       { type: 'start', partial: message },
       { type: 'toolcall_start', contentIndex: 0, partial: message },
       { type: 'toolcall_delta', contentIndex: 0, delta: '{"key":"value"}', partial: message },
@@ -446,9 +507,9 @@ describe('Model Gateway HTTP and protocol contracts', () => {
   })
 
   test('Responses streaming keeps namespaced function-call identity', async () => {
-    const call = { type: 'toolCall', id: 'call_ns_stream', name: 'multi_agent_v1__spawn_agent', arguments: { task: 'check' } } as const
-    const message = { ...assistantMessage(), content: [call], stopReason: 'toolUse' } as AssistantMessage
-    const events: AssistantMessageEvent[] = [
+    const call = { type: 'tool_call', id: 'call_ns_stream', name: 'multi_agent_v1__spawn_agent', arguments: { task: 'check' } } as const
+    const message = { ...assistantMessage(), content: [call], stopReason: 'toolUse' } as ModelCompletion
+    const events: ModelStreamEvent[] = [
       { type: 'start', partial: message },
       { type: 'toolcall_start', contentIndex: 0, partial: message },
       { type: 'toolcall_delta', contentIndex: 0, delta: '{"task":"check"}', partial: message },
@@ -465,18 +526,18 @@ describe('Model Gateway HTTP and protocol contracts', () => {
   })
 
   test('does not expose multiple calls when a Responses client disables parallel tool calls', async () => {
-    const first = { type: 'toolCall', id: 'call_parallel_one', name: 'first_tool', arguments: {} } as const
-    const second = { type: 'toolCall', id: 'call_parallel_two', name: 'second_tool', arguments: {} } as const
-    const partial = { ...assistantMessage(), content: [first, second], stopReason: 'toolUse' } as AssistantMessage
+    const first = { type: 'tool_call', id: 'call_parallel_one', name: 'first_tool', arguments: {} } as const
+    const second = { type: 'tool_call', id: 'call_parallel_two', name: 'second_tool', arguments: {} } as const
+    const partial = { ...assistantMessage(), content: [first, second], stopReason: 'toolUse' } as ModelCompletion
     const nonParallel = createRuntime({
       async *stream(_selected, _context, options) {
         options.signal?.throwIfAborted()
-        yield { type: 'start', partial } as AssistantMessageEvent
-        yield { type: 'toolcall_start', contentIndex: 0, partial } as AssistantMessageEvent
-        yield { type: 'toolcall_end', contentIndex: 0, toolCall: first, partial } as AssistantMessageEvent
-        yield { type: 'toolcall_start', contentIndex: 1, partial } as AssistantMessageEvent
-        yield { type: 'toolcall_end', contentIndex: 1, toolCall: second, partial } as AssistantMessageEvent
-        yield { type: 'done', reason: 'toolUse', message: partial } as AssistantMessageEvent
+        yield { type: 'start', partial } as ModelStreamEvent
+        yield { type: 'toolcall_start', contentIndex: 0, partial } as ModelStreamEvent
+        yield { type: 'toolcall_end', contentIndex: 0, toolCall: first, partial } as ModelStreamEvent
+        yield { type: 'toolcall_start', contentIndex: 1, partial } as ModelStreamEvent
+        yield { type: 'toolcall_end', contentIndex: 1, toolCall: second, partial } as ModelStreamEvent
+        yield { type: 'done', reason: 'toolUse', message: partial } as ModelStreamEvent
       },
     })
     const limited = createGatewayServer({ token: TOKEN, rpcToken: RPC_TOKEN, runtime: nonParallel.runtime, port: 0 })
@@ -547,13 +608,13 @@ describe('Model Gateway HTTP and protocol contracts', () => {
   })
 
   test('uses authenticated, versioned internal RPC for both complete and stream', async () => {
-    const headers = { authorization: `Bearer ${RPC_TOKEN}`, 'x-microcode-rpc-version': '1' }
+    const headers = { authorization: `Bearer ${RPC_TOKEN}`, 'x-microcode-rpc-version': '2' }
     const complete = await post('/internal/v1/complete', {
       model: `${model.provider}/${model.id}`,
       context: { messages: [{ role: 'user', content: 'hello', timestamp: 1 }] },
     }, headers)
     expect(complete.status).toBe(200)
-    expect((await complete.json() as AssistantMessage).content[0]).toMatchObject({ type: 'text', text: 'gateway reply' })
+    expect((await complete.json() as ModelCompletion).content[0]).toMatchObject({ type: 'text', text: 'gateway reply' })
 
     const stream = await post('/internal/v1/stream', {
       model: `${model.provider}/${model.id}`,
@@ -566,7 +627,7 @@ describe('Model Gateway HTTP and protocol contracts', () => {
 
   test('serves project-scoped model metadata through authenticated private RPC without upstream endpoints', async () => {
     const response = await fetch(`${baseUrl}/internal/v1/models?cwd=${encodeURIComponent(process.cwd())}`, {
-      headers: { authorization: `Bearer ${RPC_TOKEN}`, 'x-microcode-rpc-version': '1' },
+      headers: { authorization: `Bearer ${RPC_TOKEN}`, 'x-microcode-rpc-version': '2' },
     })
     expect(response.status).toBe(200)
     const body = await response.json() as { data: Array<Record<string, unknown>>; current_model_id: string }
@@ -666,7 +727,7 @@ describe('Model Gateway HTTP and protocol contracts', () => {
     const completed = await client.completeSimple(model, context)
     expect(completed.content[0]).toMatchObject({ type: 'text', text: 'gateway reply' })
 
-    const events: AssistantMessageEvent[] = []
+    const events: PiAssistantMessageEvent[] = []
     for await (const event of client.streamSimple(model, context)) events.push(event)
     expect(events.map((event) => event.type)).toEqual(['start', 'text_start', 'text_delta', 'text_delta', 'text_end', 'done'])
   })
@@ -678,7 +739,7 @@ describe('Model Gateway HTTP and protocol contracts', () => {
 
     const completed = await client.completeSimple(model, context)
     expect(completed.content[0]).toMatchObject({ type: 'text', text: 'gateway reply' })
-    const events: AssistantMessageEvent[] = []
+    const events: PiAssistantMessageEvent[] = []
     for await (const event of client.streamSimple(model, context)) events.push(event)
     expect(events.at(-1)?.type).toBe('done')
 
@@ -700,7 +761,7 @@ describe('Model Gateway HTTP and protocol contracts', () => {
       const context = { messages: [{ role: 'user' as const, content: 'x'.repeat(200), timestamp: 1 }] }
 
       await expect(client.completeSimple(model, context)).rejects.toThrow('Model Gateway completion request failed (HTTP 413): Request body exceeds the configured size limit.')
-      const events: AssistantMessageEvent[] = []
+      const events: PiAssistantMessageEvent[] = []
       for await (const event of client.streamSimple(model, context)) events.push(event)
       const error = events.find((event) => event.type === 'error')
       expect(error?.type === 'error' ? error.error.errorMessage : '').toBe('Model Gateway stream request failed (HTTP 413): Request body exceeds the configured size limit.')
@@ -864,7 +925,7 @@ describe('Model Gateway HTTP and protocol contracts', () => {
     expect((await post('/v1/chat/completions', body)).status).toBe(401)
     expect((await post('/v1/chat/completions', { ...body, model: 'not-a-model' }, { authorization: `Bearer ${TOKEN}` })).status).toBe(404)
     expect((await post('/internal/v1/complete', { model: `${model.provider}/${model.id}`, context: { messages: [] } }, { authorization: `Bearer ${RPC_TOKEN}`, 'x-microcode-rpc-version': '999' })).status).toBe(426)
-    expect((await post('/internal/v1/complete', { model: `${model.provider}/${model.id}`, context: { messages: [] } }, { authorization: `Bearer ${TOKEN}`, 'x-microcode-rpc-version': '1' })).status).toBe(401)
+    expect((await post('/internal/v1/complete', { model: `${model.provider}/${model.id}`, context: { messages: [] } }, { authorization: `Bearer ${TOKEN}`, 'x-microcode-rpc-version': '2' })).status).toBe(401)
     expect((await fetch(`${baseUrl}/v1/chat/completions`, { headers: { authorization: `Bearer ${TOKEN}` } })).status).toBe(405)
     expect(runtimeState.calls).toHaveLength(0)
   })

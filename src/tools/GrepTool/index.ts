@@ -1,7 +1,5 @@
 import { registerTool } from '../registry.ts'
 import { createGrepTool, TOOL_NAME, TOOL_DEFAULT_PERMISSION } from './GrepTool.ts'
-import { GrepToolUI } from './UI.tsx'
-import { preview } from '../../utils/displayUtils.ts'
 import { boolTag, count, joinSummaryParts, previewList, statusPrefix } from '../summary.ts'
 
 registerTool({
@@ -27,21 +25,6 @@ registerTool({
         count(details.numLines, 'lines'), boolTag(details.truncated, 'truncated'),
         previewList(details.filenames, 5, 'files'),
       ])}`
-    },
-  },
-  presentation: {
-    View: GrepToolUI,
-    activity: ({ input }) =>
-      typeof input.pattern === 'string'
-        ? `Searching for ${input.pattern}`
-        : 'Searching the codebase',
-    detail: ({ input }) =>
-      typeof input.pattern === 'string' ? preview(input.pattern, 30) : 'grep',
-    status: ({ details }) => {
-      if (!details) return 'Searching...'
-      const matches = typeof details.numMatches === 'number' ? details.numMatches : 0
-      const files = typeof details.numFiles === 'number' ? details.numFiles : 0
-      return files > 0 ? `${matches} matches · ${files} files` : `${matches} matches`
     },
   },
 })

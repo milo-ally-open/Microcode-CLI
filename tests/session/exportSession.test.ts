@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { exportSessionJsonl } from '../../src/session/exportSession.ts'
+import { exportSessionJsonl } from '../../src/kernel/pi/exportSession.ts'
 
 describe('exportSessionJsonl', () => {
   test('copies the original JSONL into a session-specific project archive', async () => {

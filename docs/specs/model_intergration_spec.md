@@ -1,19 +1,19 @@
 # Model Integration and Harness-Agnostic Gateway Specification
 
-- Status: Direct Microcode integration remains available; the standalone gateway and default TUI RPC routing are implemented in an initial form. Protocol limitations and harness certification gates below remain in effect.
-- Updated: 2026-09-30
-- Scope: (I) Microcode's direct, in-process integration with pi-ai/pi-agent-core, including model discovery, credentials, and context handling; (II) a harness-independent gateway that exposes the same model ecosystem to Microcode and external harnesses.
+- Status: This document records the current/legacy Pi integration and Model Gateway behavior. Target architecture, allowed upstream providers/auth and the expanded protocol matrix are owned by docs/specs/runtime-architecture/spec.md.
+- Updated: 2026-10-27
+- Scope: Current implementation baseline for direct Pi integration and the harness-independent gateway; target changes follow docs/specs/runtime-architecture/spec.md.
 - Current dependency baseline: `@earendil-works/pi-ai@0.87.1` and `@earendil-works/pi-agent-core@0.87.1`. The checked-in `package.json` and `bun.lock` are authoritative.
-- Repository guidance: follow [AGENTS.md](../../AGENTS.md) for repository-wide working agreements. This document defines the model integration and gateway product/acceptance contract.
+- Repository guidance: follow AGENTS.md and docs/specs/runtime-architecture/spec.md for the target architecture. This document preserves the Pi dependency lifecycle and current Gateway implementation facts.
 
 ## Purpose and structure
 
-Microcode should benefit from Pi's broad and evolving provider ecosystem without copying provider catalogs, authentication flows, or API implementations. There are two related but distinct integration modes:
+Microcode reuses Pi provider implementations and APIs where they fit, while the target product allowlist is intentionally smaller than Pi catalog. Provider/auth policy for the refactor is defined by docs/specs/runtime-architecture/spec.md; this document records existing implementation details and does not expand that allowlist.
 
 1. **Direct Microcode integration**: Microcode's own Agent/TUI uses the pinned Pi runtime in-process. This is the existing integration path and must remain intact; `microcode --no-daemon` continues to use it without routing through the gateway.
 2. **Harness-independent Model Gateway**: a separately running local API service uses the same Pi model runtime and credentials, and exposes standard wire protocols to Microcode or other harnesses. It provides model inference only; it is not an Agent harness.
 
-Part II builds on the provider/model/auth foundation in Part I, but is additive: gateway implementation belongs under `src/daemon/` and must not rewrite or replace the existing direct Pi integration. If default startup later routes the Microcode TUI through the daemon, that is a transport selection at the boundary; `--no-daemon` preserves the existing in-process path and the model/provider/auth behavior remains equivalent. External harnesses retain their own tools, permissions, prompts, context strategy, approvals, and session lifecycle. Support for a provider through pi-ai does not by itself establish compatibility with every gateway protocol or harness.
+The target architecture keeps Pi behind a kernel/provider adapter and moves the Microcode Agent runtime into a Bun service. The explicit --no-daemon path continues to use an in-process runtime. External harnesses retain their own tools, permissions, prompts, context strategy, approvals, and session lifecycle. Provider/auth policy and the four target client protocols are defined by docs/specs/runtime-architecture/spec.md.
 
 # Part I — Direct model integration in Microcode
 
@@ -27,18 +27,18 @@ The exact installed/pinned package is runtime truth. Live documentation and movi
 
 ## 2. Current architecture and ownership
 
-- `src/models/registry.ts` uses `builtinModels()` to construct the shared Pi `Models` collection and injects Microcode's `EncryptedCredentialStore`.
+- `src/models/registry.ts` constructs a Pi `Models` collection with Microcode's `EncryptedCredentialStore`, then registers the statically reviewed `openai-codex`, GPT-filtered `openai`, and `deepseek` providers from `src/models/providers/`. This is the current allowlist slice; the kernel-independent Microcode model facade remains tracked by the runtime architecture tasks.
 - `src/models/authChoices.ts` builds login choices from provider auth descriptors rather than a per-vendor UI list.
 - `src/tui/app.ts` uses Pi model APIs for login, auth checks, and logout; Pi providers own OAuth, refresh, credential conversion, and request authentication.
 - `src/entry.ts` calls `registerBunOAuthFlows()` so OAuth loaders are available in a Bun standalone executable.
 - `src/models/EncryptedCredentialStore.ts` implements Pi's credential-store interface with encrypted persistence. Microcode must not add a parallel OAuth token file or vendor-specific credential cache.
-- `src/models/custom.ts` supports user-defined API-compatible models. Custom models currently use API keys and must not execute arbitrary OAuth callback code.
+- `src/models/custom.ts` retains the legacy custom-model parser and shape so existing config is not deleted. These entries are currently disabled by the provider allowlist and produce a generic diagnostic; they are not registered or sent for inference.
 
 Authentication belongs to a Provider, not each individual model. Model metadata and authentication mechanisms are separate concerns. Do not create vendor-specific Microcode OAuth modules unless Pi demonstrably cannot support a required, permitted behavior.
 
 ## 3. Provider and authentication discovery
 
-The following is a snapshot of the locked `pi-ai@0.87.1` catalog, not a permanent allowlist. It must be checked against `builtinProviders()` and the actual registered model collection; tests and runtime discovery must not hard-code this list as the way to discover providers.
+The following table documents the pre-refactor implementation snapshot of locked pi-ai@0.87.1 only. It is not the target provider allowlist; post-refactor provider/auth choices are limited by docs/specs/runtime-architecture/spec.md.
 
 | Provider ID | Current authentication descriptor | Notes |
 |---|---|---|
@@ -132,25 +132,25 @@ On Pi upgrades, check model metadata and compaction defaults. Verify model switc
 
 Acceptance criteria:
 
-- `/model list` comes from the exact pinned Pi catalog; each provider/model appears once and its source is traceable.
-- `/login`, `/auth`, and `/logout` match provider auth descriptors, including non-subscription OAuth; API-key-only providers do not show OAuth.
-- Subscription OAuth and account-linking labels differ; unreviewed vendor policy is not represented as generally permitted. Google consumer OAuth is not imported.
-- API keys, cloud identity, and plan-specific endpoints follow Pi definitions; there is no silent cross-product key fallback or endpoint rewrite.
+- `/model list` comes from the exact pinned Pi catalog filtered through the reviewed Microcode provider/model allowlist; each provider/model appears once and its source is traceable.
+- `/login`, `/auth`, and `/logout` match the approved provider auth descriptors: OpenAI Codex OAuth, OpenAI GPT API key, and DeepSeek API key.
+- Only the approved Codex OAuth flow is exposed; other Pi OAuth and API-key providers remain unavailable through the Microcode registry.
+- API keys and endpoint overrides use the approved provider and environment variables; generic `API_KEY` and unsupported provider keys are not consulted.
 - Login handles browser URL, device/manual codes, prompts, cancellation, errors, and success timing; Pi owns refresh/request auth and Microcode encrypts credentials. No secrets leak.
 - OAuth interaction, refresh, logout, failure, and concurrent credential-store behavior have tests that need no vendor secrets. Real OAuth remains manual.
 - Bun standalone build includes the pinned Pi OAuth loaders and the compiled CLI starts; development-mode success alone is insufficient.
 - Upstream upgrades include lockfile, tests, build checks, and release notes; users need a new release to receive new catalog data.
 
-Current progress recorded by the source spec: Provider-driven login discovery, coverage of eight OAuth providers in the pinned catalog (six subscription + OpenRouter/Radius two non-subscription), and removal of duplicate Codex auth wrapping are complete. Routine tests and compilation were reported passing. Real vendor login, dedicated end-to-end OAuth verification, and provider-by-provider policy/region/account eligibility review remain open.
+Historical implementation status recorded on 2026-09-30: provider-driven login discovery, eight OAuth descriptors in the then-current Pi catalog, and removal of duplicate Codex auth wrapping were reported complete. This is not evidence for the target allowlist or runtime separation; verify all refactor acceptance conditions independently.
 
 Key code entry points:
 
-- `src/models/registry.ts` — Pi catalog, shared model collection, custom providers.
+- `src/models/registry.ts` — reviewed Pi provider catalog, shared model collection, model selection, and legacy-config diagnostics.
 - `src/models/authChoices.ts` — auth options generated from Provider descriptors.
 - `src/models/EncryptedCredentialStore.ts` — Pi credential interface and encrypted persistence.
 - `src/entry.ts` — Bun standalone OAuth loader registration.
 - `src/tui/app.ts` — `/login`, `/logout`, `/auth`, prompts, and browser links.
-- `src/models/custom.ts` — user model definitions and explicit context window.
+- `src/models/custom.ts` — legacy custom-model config parser; entries remain disabled under the current provider allowlist.
 - `src/agent/MicrocodeAgent.ts` and `src/session/CompactionManager.ts` — context transform and auto-compaction.
 - `tests/models/authChoices.test.ts` — provider OAuth/API-key discovery.
 - `package.json` and `bun.lock` — exact dependency versions.
@@ -171,6 +171,8 @@ Use these moving upstream links to discover changes, then verify every behavior 
 - [OpenAI Codex CLI and ChatGPT plans](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)
 
 # Part II — Harness-independent Model Gateway
+The following sections record the pre-refactor Model Gateway implementation and current endpoint/security invariants. The target adds the Gemini subset and uses the provider allowlist in docs/specs/runtime-architecture/spec.md; the future runtime service boundary is defined only in that architecture spec.
+
 
 ## 8. Summary and product contract
 
@@ -246,7 +248,7 @@ All new daemon lifecycle, service, internal RPC, and public protocol adapter cod
 - Preserve normalized text, reasoning/thinking (when supplied), tool-call deltas, usage/cost, stop reason, provider errors, and abort events. Adapters translate; they do not reimplement upstream HTTP APIs.
 - Use actual registered model metadata for provider/API identity, modalities, reasoning, context, and output limits. Never synthesize unsupported capabilities.
 - Resolve upstream credentials through the existing Microcode encrypted credential integration inside the daemon. Never return provider keys, OAuth tokens, auth headers, or raw auth diagnostics.
-- Preserve custom models through public Pi provider/API interfaces. Reconcile the current custom-model protocol switch gap without arbitrary code execution or duplicated provider logic.
+- Legacy custom model entries remain on disk but are disabled by the current allowlist. Re-enable them only after an explicit policy/spec change and a reviewed adapter contract.
 
 Keep these live discovery references indexed and revisit them when designing/changing provider integration:
 

@@ -1,6 +1,4 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core'
-import type { Api, AssistantMessage, Model, Usage } from '@earendil-works/pi-ai'
-import { estimateMessagesTokens } from '../session/TokenEstimator.ts'
+import { estimateMessagesTokens, type TokenEstimatorMessage } from '../session/TokenEstimator.ts'
 
 export interface ContextTokenUsage {
   readonly systemPromptTokens: number
@@ -26,7 +24,7 @@ export interface ModelTokenUsage extends ApiTokenUsage {
   readonly key: string
   readonly modelId: string
   readonly provider: string
-  readonly api: Api
+  readonly api: string
 }
 
 export interface AgentTokenSnapshot {
@@ -36,12 +34,36 @@ export interface AgentTokenSnapshot {
   readonly byModel: Readonly<Record<string, Readonly<ModelTokenUsage>>>
 }
 
+interface TrackedAssistantMessage {
+  role: 'assistant'
+  responseId?: string
+  provider: string
+  api: string
+  model: string
+  timestamp: number
+  usage: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    totalTokens: number
+    cost: { total: number }
+  }
+}
+
+interface ModelIdentity {
+  provider: string
+  api: string
+  id: string
+  contextWindow: number
+}
+
 interface UsageEntry {
   key: string
   modelId: string
   provider: string
-  api: Api
-  usage: Usage
+  api: string
+  usage: TrackedAssistantMessage['usage']
 }
 
 function emptyUsage(): ApiTokenUsage {
@@ -56,7 +78,7 @@ function emptyUsage(): ApiTokenUsage {
   }
 }
 
-function addUsage(target: ApiTokenUsage, usage: Usage): ApiTokenUsage {
+function addUsage(target: ApiTokenUsage, usage: TrackedAssistantMessage['usage']): ApiTokenUsage {
   return {
     requests: target.requests + 1,
     inputTokens: target.inputTokens + usage.input,
@@ -68,11 +90,11 @@ function addUsage(target: ApiTokenUsage, usage: Usage): ApiTokenUsage {
   }
 }
 
-function modelKey(provider: string, api: Api, modelId: string): string {
+function modelKey(provider: string, api: string, modelId: string): string {
   return `${provider}:${api}:${modelId}`
 }
 
-function requestKey(message: AssistantMessage): string {
+function requestKey(message: TrackedAssistantMessage): string {
   if (message.responseId) {
     return `${message.provider}:${message.api}:${message.responseId}`
   }
@@ -98,26 +120,27 @@ function freezeModelUsage(usage: ModelTokenUsage): Readonly<ModelTokenUsage> {
 export class AgentTokenTracker {
   private readonly entries = new Map<string, UsageEntry>()
 
-  recordMessage(message: AgentMessage): void {
-    if (message.role !== 'assistant') return
-    const key = requestKey(message)
+  recordMessage(message: unknown): void {
+    const tracked = this.toTrackedAssistantMessage(message)
+    if (!tracked) return
+    const key = requestKey(tracked)
     if (this.entries.has(key)) return
     this.entries.set(key, {
       key,
-      modelId: message.model,
-      provider: String(message.provider),
-      api: message.api,
-      usage: message.usage,
+      modelId: tracked.model,
+      provider: tracked.provider,
+      api: tracked.api,
+      usage: tracked.usage,
     })
   }
 
-  recordMessages(messages: readonly AgentMessage[]): void {
+  recordMessages(messages: readonly unknown[]): void {
     for (const message of messages) {
       this.recordMessage(message)
     }
   }
 
-  rebuild(messages: readonly AgentMessage[]): void {
+  rebuild(messages: readonly unknown[]): void {
     this.entries.clear()
     this.recordMessages(messages)
   }
@@ -128,8 +151,8 @@ export class AgentTokenTracker {
 
   getSnapshot(options: {
     systemPrompt: string
-    messages: readonly AgentMessage[]
-    model: Model<Api>
+    messages: readonly TokenEstimatorMessage[]
+    model: ModelIdentity
   }): Readonly<AgentTokenSnapshot> {
     this.recordMessages(options.messages)
 
@@ -168,14 +191,14 @@ export class AgentTokenTracker {
     }
 
     const currentKey = modelKey(
-      String(options.model.provider),
+      options.model.provider,
       options.model.api,
       options.model.id,
     )
     const currentModel = grouped.get(currentKey) ?? {
       key: currentKey,
       modelId: options.model.id,
-      provider: String(options.model.provider),
+      provider: options.model.provider,
       api: options.model.api,
       ...emptyUsage(),
     }
@@ -190,5 +213,38 @@ export class AgentTokenTracker {
       currentModel: freezeModelUsage(currentModel),
       byModel: Object.freeze(byModel),
     })
+  }
+
+  private toTrackedAssistantMessage(message: unknown): TrackedAssistantMessage | undefined {
+    if (!message || typeof message !== 'object') return undefined
+    const value = message as Record<string, unknown>
+    if (value.role !== 'assistant') return undefined
+    if (typeof value.provider !== 'string' || typeof value.api !== 'string' || typeof value.model !== 'string') return undefined
+
+    const usage = value.usage
+    if (!usage || typeof usage !== 'object') return undefined
+    const usageValue = usage as Record<string, unknown>
+    const cost = usageValue.cost
+    if (!cost || typeof cost !== 'object') return undefined
+    const costValue = cost as Record<string, unknown>
+    const numberOrZero = (field: string): number =>
+      typeof usageValue[field] === 'number' ? usageValue[field] as number : 0
+
+    return {
+      role: 'assistant',
+      ...(typeof value.responseId === 'string' ? { responseId: value.responseId } : {}),
+      provider: value.provider,
+      api: value.api,
+      model: value.model,
+      timestamp: typeof value.timestamp === 'number' ? value.timestamp : 0,
+      usage: {
+        input: numberOrZero('input'),
+        output: numberOrZero('output'),
+        cacheRead: numberOrZero('cacheRead'),
+        cacheWrite: numberOrZero('cacheWrite'),
+        totalTokens: numberOrZero('totalTokens'),
+        cost: { total: typeof costValue.total === 'number' ? costValue.total : 0 },
+      },
+    }
   }
 }

@@ -1,13 +1,20 @@
 import { MicrocodeAgent } from './MicrocodeAgent.ts'
-import type { CreateMicrocodeAgentOptions } from './types.ts'
+import type { AgentMessage } from '@earendil-works/pi-agent-core'
+import type { Api, Model } from '@earendil-works/pi-ai'
+import { createPiAgentRuntimeAdapter, type PiMicrocodeAgentOptions } from './piRuntimeAdapter.ts'
 
 export function createMicrocodeAgentRuntime(
-  options: CreateMicrocodeAgentOptions = {},
-): MicrocodeAgent {
-  return new MicrocodeAgent(options)
+  options: PiMicrocodeAgentOptions = {},
+): MicrocodeAgent<AgentMessage, Model<Api>> {
+  return new MicrocodeAgent(createPiAgentRuntimeAdapter(options), options)
 }
 
-export { MicrocodeAgent, createConvertToLlm } from './MicrocodeAgent.ts'
+export type PiMicrocodeAgent = MicrocodeAgent<AgentMessage, Model<Api>>
+
+export { MicrocodeAgent } from './MicrocodeAgent.ts'
+export type { AgentRuntimeAdapter, AgentKernelSetup } from './contracts.ts'
+export { AgentToolSnapshotConflictError } from './AgentToolManager.ts'
+export { createPiModelMessageMapper as createConvertToLlm } from '../kernel/pi/mapper.ts'
 export type {
   AgentIdentity,
   AgentCompactionResult,

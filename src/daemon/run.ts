@@ -1,6 +1,6 @@
 import { configuredGatewayHost, configuredGatewayPort, getOrCreateGatewayRpcToken, getOrCreateGatewayToken, removeGatewayMetadata, writeGatewayMetadata, type GatewayMetadata } from './config.ts'
 import { createGatewayServer, GATEWAY_PROTOCOL_VERSION } from './server.ts'
-import { createPiGatewayRuntime } from './runtime.ts'
+import { createPiGatewayRuntime } from '../models/piRuntime.ts'
 import type { GatewayServerHandle } from './types.ts'
 
 export async function writeGatewayMetadataOrStopServer(

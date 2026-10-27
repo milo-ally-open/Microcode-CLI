@@ -1,4 +1,5 @@
 import chalk from 'chalk'
+export { countContentLines } from '../utils/textUtils.ts'
 
 const TOOL_LABEL_COLUMN_WIDTH = 12
 
@@ -56,14 +57,4 @@ export function formatBytes(bytes: number): string {
 
   const precision = value < 10 ? 1 : 0
   return `${value.toFixed(precision)} ${units[unitIndex]}`
-}
-export function countContentLines(content: string): number {
-  if (content.length === 0) return 0
-
-  let lineCount = 1
-  for (let index = 0; index < content.length; index++) {
-    if (content.charCodeAt(index) === 10) lineCount++
-  }
-
-  return content.endsWith('\n') ? lineCount - 1 : lineCount
 }

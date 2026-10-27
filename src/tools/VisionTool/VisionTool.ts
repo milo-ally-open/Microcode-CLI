@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { Type, type Static } from 'typebox'
 import { isAbsolute, resolve } from 'path'
 import type { PermissionBehavior } from '../../permissions/types.ts'
@@ -26,7 +26,7 @@ export interface VisionToolDetails {
   sourceType: 'url' | 'file'
 }
 
-export function createVisionTool(cwd: string): AgentTool<typeof VisionToolSchema, VisionToolDetails> {
+export function createVisionTool(cwd: string): ToolAdapter<typeof VisionToolSchema, VisionToolDetails> {
   return {
     name: TOOL_NAME,
     label: 'Process Image',
@@ -37,8 +37,8 @@ export function createVisionTool(cwd: string): AgentTool<typeof VisionToolSchema
       _toolCallId: string,
       params: VisionToolInput,
       _signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<VisionToolDetails>) => void,
-    ): Promise<AgentToolResult<VisionToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<VisionToolDetails>) => void,
+    ): Promise<ToolExecutionResult<VisionToolDetails>> {
       const { image_source, prompt } = params
       const sourceType: 'url' | 'file' = (image_source.startsWith('http://') || image_source.startsWith('https://')) ? 'url' : 'file'
 

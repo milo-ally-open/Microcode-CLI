@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { type Static, Type } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 import { grepSearch } from '../../utils/searchUtils.ts'
@@ -66,7 +66,7 @@ export interface GrepToolDetails {
   truncated: boolean
 }
 
-export function createGrepTool(cwd: string): AgentTool<typeof grepSchema, GrepToolDetails> {
+export function createGrepTool(cwd: string): ToolAdapter<typeof grepSchema, GrepToolDetails> {
   return {
     name: TOOL_NAME,
     label: 'Grep',
@@ -77,8 +77,8 @@ export function createGrepTool(cwd: string): AgentTool<typeof grepSchema, GrepTo
       _toolCallId: string,
       params: GrepToolInput,
       signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<GrepToolDetails>) => void,
-    ): Promise<AgentToolResult<GrepToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<GrepToolDetails>) => void,
+    ): Promise<ToolExecutionResult<GrepToolDetails>> {
       const outputMode = params.output_mode || 'content'
       const contextC = params['-C'] ?? params.context
 

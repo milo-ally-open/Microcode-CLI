@@ -1,4 +1,5 @@
 import type { ToolSummaryContext } from './registry.ts'
+import { countContentLines } from '../utils/textUtils.ts'
 
 export function count(value: unknown, noun: string): string | undefined {
   return typeof value === 'number' ? `${value.toLocaleString()} ${noun}` : undefined
@@ -6,9 +7,7 @@ export function count(value: unknown, noun: string): string | undefined {
 
 /** Count logical content lines without inventing a row for a final newline. */
 export function countLines(value: string): number {
-  if (!value) return 0
-  const lines = value.split('\n').length
-  return value.endsWith('\n') ? lines - 1 : lines
+  return countContentLines(value)
 }
 
 export function text(value: unknown): string | undefined {

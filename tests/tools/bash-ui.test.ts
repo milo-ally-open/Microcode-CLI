@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { BashToolUI } from '../../src/tools/BashTool/UI.tsx'
+import { BashToolUI } from '../../src/tui/toolViews/Bash.tsx'
 
 describe('BashToolUI', () => {
   test('hides all output by default and preserves output verbatim when expanded', () => {

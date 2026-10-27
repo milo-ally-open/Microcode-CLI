@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { Type, type Static } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 
@@ -103,7 +103,7 @@ function buildOutput(
   return sections.filter((section): section is string => section !== undefined).join('\n')
 }
 
-export function createWebFetchTool(): AgentTool<typeof webFetchSchema, WebFetchToolDetails> {
+export function createWebFetchTool(): ToolAdapter<typeof webFetchSchema, WebFetchToolDetails> {
   return {
     name: TOOL_NAME,
     label: 'WebFetch',
@@ -114,8 +114,8 @@ export function createWebFetchTool(): AgentTool<typeof webFetchSchema, WebFetchT
       _toolCallId: string,
       params: WebFetchToolInput,
       signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<WebFetchToolDetails>) => void,
-    ): Promise<AgentToolResult<WebFetchToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<WebFetchToolDetails>) => void,
+    ): Promise<ToolExecutionResult<WebFetchToolDetails>> {
       const startedAt = Date.now()
       const url = normalizeUrl(params.url)
 

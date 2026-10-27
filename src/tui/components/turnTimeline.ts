@@ -1,6 +1,6 @@
 import { Container, Spacer, Text, type Component } from '@earendil-works/pi-tui'
 import chalk from 'chalk'
-import type { ToolInteractionTarget, ToolUIComponent } from '../../tools/registry.ts'
+import type { ToolInteractionTarget, ToolUIComponent } from '../toolPresentationRegistry.ts'
 
 type EntryKind = 'user' | 'assistant' | 'tool' | 'status'
 

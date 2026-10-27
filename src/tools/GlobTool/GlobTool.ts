@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { type Static, Type } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 import { globSearch } from '../../utils/searchUtils.ts'
@@ -27,7 +27,7 @@ export interface GlobToolDetails {
   durationMs: number
 }
 
-export function createGlobTool(cwd: string): AgentTool<typeof globSchema, GlobToolDetails> {
+export function createGlobTool(cwd: string): ToolAdapter<typeof globSchema, GlobToolDetails> {
   return {
     name: TOOL_NAME,
     label: 'Glob',
@@ -38,8 +38,8 @@ export function createGlobTool(cwd: string): AgentTool<typeof globSchema, GlobTo
       _toolCallId: string,
       params: GlobToolInput,
       signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<GlobToolDetails>) => void,
-    ): Promise<AgentToolResult<GlobToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<GlobToolDetails>) => void,
+    ): Promise<ToolExecutionResult<GlobToolDetails>> {
       const result = await globSearch(cwd, params.path, params.pattern, {
         maxResults: DEFAULT_LIMIT,
         signal,

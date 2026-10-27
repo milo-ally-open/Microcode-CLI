@@ -7,8 +7,8 @@ import {
   formatToolLabel,
   getProgressFrame,
 } from '../toolPresentation.ts'
-import { ToolPreviewController } from '../../tools/previewController.ts'
-import type { ToolInteractionTarget } from '../../tools/registry.ts'
+import { ToolPreviewController } from '../toolPreviewController.ts'
+import type { ToolInteractionTarget } from '../toolPresentationRegistry.ts'
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>

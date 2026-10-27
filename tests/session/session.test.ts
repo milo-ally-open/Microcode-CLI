@@ -3,11 +3,17 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { estimateMessagesTokens, estimateTokens } from '../../src/session/TokenEstimator.ts'
-import { replaceImageBlocksForPersistence } from '../../src/session/imageSerializer.ts'
+import { PiJsonlSessionStore, piSessionTranscriptAdapter, replacePiImageBlocksForPersistence } from '../../src/kernel/pi/session.ts'
 import { SessionManager } from '../../src/session/SessionManager.ts'
 import { getAllModels } from '../../src/models/index.ts'
 
 describe('session modules', () => {
+  const createManager = (options: { sessionsRoot?: string; tasksRoot?: string } = {}) => new SessionManager({
+    store: new PiJsonlSessionStore(options.sessionsRoot),
+    transcript: piSessionTranscriptAdapter,
+    tasksRoot: options.tasksRoot,
+  })
+
   test('estimates text, thinking, tool call, image, and summary messages', () => {
     const user = { role: 'user', content: '12345678', timestamp: 0 } as any
     const assistant = {
@@ -51,20 +57,20 @@ describe('session modules', () => {
       ],
       timestamp: 0,
     } as any
-    const persisted = replaceImageBlocksForPersistence(msg) as any
+    const persisted = replacePiImageBlocksForPersistence(msg) as any
 
     expect(persisted).not.toBe(msg)
     expect(persisted.content).toEqual([
       { type: 'text', text: 'see' },
       { type: 'text', text: '[Image: image/png]' },
     ])
-    expect(replaceImageBlocksForPersistence({ role: 'assistant', content: [], timestamp: 0 } as any).role).toBe('assistant')
+    expect(replacePiImageBlocksForPersistence({ role: 'assistant', content: [], timestamp: 0 } as any).role).toBe('assistant')
   })
 
   test('creates the main branch before saving the first message', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'microcode-session-'))
     const cwd = join(dir, 'workspace')
-    const manager = new SessionManager({ sessionsRoot: join(dir, 'sessions') })
+    const manager = createManager({ sessionsRoot: join(dir, 'sessions') })
     try {
       const sessionId = await manager.create(cwd)
       await manager.saveMessages([{ role: 'user', content: 'hello', timestamp: 1 } as any])
@@ -80,8 +86,8 @@ describe('session modules', () => {
     const dir = await mkdtemp(join(tmpdir(), 'microcode-session-checkpoint-'))
     const cwd = join(dir, 'workspace')
     const sessionsRoot = join(dir, 'sessions')
-    const manager = new SessionManager({ sessionsRoot })
-    let resumedManager: SessionManager | undefined
+    const manager = createManager({ sessionsRoot })
+    let resumedManager: ReturnType<typeof createManager> | undefined
     let managerClosed = false
     try {
       const sessionId = await manager.create(cwd)
@@ -117,7 +123,7 @@ describe('session modules', () => {
       await manager.close()
       managerClosed = true
 
-      resumedManager = new SessionManager({ sessionsRoot })
+      resumedManager = createManager({ sessionsRoot })
       expect(await resumedManager.open(metadata)).toEqual([...compacted, followUp])
     } finally {
       if (!managerClosed) await manager.close()
@@ -129,7 +135,7 @@ describe('session modules', () => {
   test('rebuilds the active context from legacy compaction markers without deleting history', async () => {
     const model = getAllModels()[0]!
     const dir = await mkdtemp(join(tmpdir(), 'microcode-session-legacy-compaction-'))
-    const manager = new SessionManager({ sessionsRoot: join(dir, 'sessions') })
+    const manager = createManager({ sessionsRoot: join(dir, 'sessions') })
     try {
       await manager.create(join(dir, 'workspace'))
       const original = [

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, AssistantMessageEvent, Context, Model, Models } from '@earendil-works/pi-ai'
-import { getAllModels } from '../../src/models/index.ts'
+import { getAllModels, getModelConfigDiagnostics } from '../../src/models/index.ts'
 import { completePiModel, createPiGatewayRuntime, streamPiModel } from '../../src/daemon/runtime.ts'
 
 async function writeProjectModel(cwd: string, name: string, baseUrl: string) {
@@ -56,7 +56,7 @@ describe('Pi gateway runtime', () => {
     expect(calls[2]?.options).toMatchObject({ reasoning: 'low' })
   })
 
-  test('resolves project-scoped custom models without mutating the direct/global model collection', async () => {
+  test('retains but does not expose project custom models through the gateway', async () => {
     const firstCwd = await mkdtemp(join(tmpdir(), 'microcode-gateway-project-a-'))
     const secondCwd = await mkdtemp(join(tmpdir(), 'microcode-gateway-project-b-'))
     try {
@@ -64,12 +64,18 @@ describe('Pi gateway runtime', () => {
       await writeProjectModel(secondCwd, 'Project B Model', 'http://127.0.0.1:11435/v1')
       const runtime = createPiGatewayRuntime()
 
-      const first = await runtime.resolveModel('custom:project-model/project-model', firstCwd)
-      const second = await runtime.resolveModel('custom:project-model/project-model', secondCwd)
+      const firstCustom = await runtime.resolveModel('custom:project-model/project-model', firstCwd)
+      const secondCustom = await runtime.resolveModel('custom:project-model/project-model', secondCwd)
+      const firstAllowed = await runtime.resolveModel('deepseek/deepseek-v4-pro', firstCwd)
+      const secondAllowed = await runtime.resolveModel('deepseek/deepseek-v4-pro', secondCwd)
 
-      expect(first).toMatchObject({ name: 'Project A Model', baseUrl: 'http://127.0.0.1:11434/v1', provider: 'custom:project-model' })
-      expect(second).toMatchObject({ name: 'Project B Model', baseUrl: 'http://127.0.0.1:11435/v1', provider: 'custom:project-model' })
-      expect(first).not.toBe(second)
+      expect(firstCustom).toBeUndefined()
+      expect(secondCustom).toBeUndefined()
+      expect(firstAllowed?.provider).toBe('deepseek')
+      expect(secondAllowed?.provider).toBe('deepseek')
+      expect(firstAllowed).toEqual(secondAllowed)
+      expect(getModelConfigDiagnostics(firstCwd)).toHaveLength(1)
+      expect(getAllModels().some((model) => model.id === 'project-model')).toBe(false)
     } finally {
       await Promise.all([
         rm(firstCwd, { recursive: true, force: true }),

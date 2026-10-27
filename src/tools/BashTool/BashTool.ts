@@ -1,11 +1,11 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import { TOOL_IDS, type ToolAdapter, type ToolExecutionResult } from '../contracts.ts'
 import { spawn } from 'child_process'
 import { existsSync } from 'fs'
 import { stripVTControlCharacters } from 'util'
 import { Type, type Static } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 
-export const TOOL_NAME = 'bash'
+export const TOOL_NAME = TOOL_IDS.bash
 export const TOOL_DEFAULT_PERMISSION: PermissionBehavior = 'ask'
 
 const shellConfig = getShellConfig()
@@ -106,7 +106,7 @@ function getShellConfig(): { shell: string; args: string[]; name: string } {
   return { shell: '/bin/bash', args: ['-c'], name: 'Bash' }
 }
 
-export function createBashTool(cwd: string): AgentTool<typeof bashSchema, BashToolDetails> {
+export function createBashTool(cwd: string): ToolAdapter<typeof bashSchema, BashToolDetails> {
   return {
     name: TOOL_NAME,
     label: shellConfig.name,
@@ -116,8 +116,8 @@ export function createBashTool(cwd: string): AgentTool<typeof bashSchema, BashTo
       _toolCallId: string,
       params: BashToolInput,
       signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<BashToolDetails>) => void,
-    ): Promise<AgentToolResult<BashToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<BashToolDetails>) => void,
+    ): Promise<ToolExecutionResult<BashToolDetails>> {
       const { command, timeout } = params
 
       if (!existsSync(cwd)) {

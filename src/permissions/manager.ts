@@ -1,4 +1,4 @@
-import type { AgentTool, BeforeToolCallContext, BeforeToolCallResult } from '@earendil-works/pi-agent-core'
+import type { KernelToolCallDecision, KernelToolCallRequest } from '../kernel/contracts.ts'
 import { getToolDefinition } from '../tools/registry.ts'
 import { matchRule, parseRuleString, ruleValueToString } from './rules.ts'
 import type {
@@ -27,7 +27,13 @@ export interface PermissionManagerOptions {
     toolName: string,
     input: Record<string, unknown>,
   ) => Promise<{ answers?: Record<string, string>; block?: boolean }>
-  getTool?: (name: string) => AgentTool<any, any> | undefined
+  getTool?: (name: string) => PermissionToolBinding | undefined
+}
+
+/** Narrow tool capability needed by the Ask permission flow. */
+export interface PermissionToolBinding {
+  name: string
+  setAnswers?: (answers: Record<string, string>) => void
 }
 
 export class PermissionManager {
@@ -41,7 +47,7 @@ export class PermissionManager {
     toolName: string,
     input: Record<string, unknown>,
   ) => Promise<{ answers?: Record<string, string>; block?: boolean }>
-  private getTool?: (name: string) => AgentTool<any, any> | undefined
+  private getTool?: (name: string) => PermissionToolBinding | undefined
 
   constructor(options: PermissionManagerOptions = {}) {
     const allowRules: PermissionRule[] = []
@@ -92,7 +98,7 @@ export class PermissionManager {
   }
 
   setGetTool(
-    resolver: (name: string) => AgentTool<any, any> | undefined,
+    resolver: (name: string) => PermissionToolBinding | undefined,
   ): void {
     this.getTool = resolver
   }
@@ -162,6 +168,27 @@ export class PermissionManager {
     })
   }
 
+  inheritFrom(
+    snapshot: Readonly<PermissionSnapshot>,
+    extraDeny: readonly PermissionRuleValue[] = [],
+    updateMode = true,
+  ): void {
+    const appendRule = (
+      values: readonly Readonly<PermissionRule>[],
+      behavior: PermissionBehavior,
+    ): PermissionRule[] => values.map((rule) => ({ ...rule, behavior }))
+
+    this.context = {
+      mode: updateMode ? snapshot.mode : this.context.mode,
+      allowRules: appendRule(snapshot.allowRules, 'allow'),
+      denyRules: [
+        ...appendRule(snapshot.denyRules, 'deny'),
+        ...extraDeny.map((rule) => ({ ...rule, behavior: 'deny' as const, source: 'session' as const })),
+      ],
+      askRules: appendRule(snapshot.askRules, 'ask'),
+    }
+  }
+
   checkPermission(
     toolName: string,
     _input: Record<string, unknown>,
@@ -196,10 +223,9 @@ export class PermissionManager {
   }
 
   async checkPermissionWithPrompt(
-    ctx: BeforeToolCallContext,
-  ): Promise<BeforeToolCallResult | undefined> {
-    const toolName = ctx.toolCall.name
-    const input = (ctx.args ?? ctx.toolCall.arguments) as Record<string, unknown>
+    request: KernelToolCallRequest,
+  ): Promise<KernelToolCallDecision | undefined> {
+    const { toolName, input } = request
     const decision = this.checkPermission(toolName, input)
 
     if (decision.allowed) return undefined
@@ -215,7 +241,7 @@ export class PermissionManager {
         return { block: true, reason: `User cancelled question for "${toolName}"` }
       }
       if (result.answers && this.getTool) {
-        const tool = this.getTool(toolName) as any
+        const tool = this.getTool(toolName)
         if (tool?.setAnswers) {
           tool.setAnswers(result.answers)
         }

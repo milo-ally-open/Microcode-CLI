@@ -1,11 +1,12 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import { TOOL_IDS, type ToolAdapter, type ToolExecutionResult } from '../contracts.ts'
 import { readFile, writeFile } from 'fs/promises'
 import { isAbsolute, resolve } from 'path'
 import { Type, type Static } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 import { countLineChanges, generateDiff } from '../../utils/diffUtils.ts'
+import { countContentLines } from '../../utils/textUtils.ts'
 
-export const TOOL_NAME = 'edit'
+export const TOOL_NAME = TOOL_IDS.edit
 export const TOOL_DEFAULT_PERMISSION: PermissionBehavior = 'ask'
 
 const editSchema = Type.Object({
@@ -98,19 +99,36 @@ export async function previewFileEdit(cwd: string, params: FileEditToolInput): P
   return (await prepareFileEdit(cwd, params)).details
 }
 
-export function createFileEditTool(cwd: string): AgentTool<typeof editSchema, FileEditToolDetails> {
+export function createFileEditTool(cwd: string): ToolAdapter<typeof editSchema, FileEditToolDetails> {
   return {
     name: TOOL_NAME,
     label: 'Edit',
     description:
       'Edit a file by replacing an exact string match. The old_string must be unique in the file unless replace_all is true.',
     parameters: editSchema,
+    async getApprovalPreview(input) {
+      const params = input as unknown as FileEditToolInput
+      const filePath = isAbsolute(params.file_path) ? params.file_path : resolve(cwd, params.file_path)
+      try {
+        return { ...await previewFileEdit(cwd, params), phase: 'preparing' }
+      } catch (error) {
+        return {
+          path: filePath,
+          replacements: params.replace_all === true ? 0 : 1,
+          additions: countContentLines(params.new_string),
+          removals: countContentLines(params.old_string),
+          diff: [],
+          previewNotice: `Preview unavailable: ${error instanceof Error ? error.message : 'unable to read file'}`,
+          phase: 'preparing',
+        }
+      }
+    },
     async execute(
       _toolCallId: string,
       params: FileEditToolInput,
       _signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<FileEditToolDetails>) => void,
-    ): Promise<AgentToolResult<FileEditToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<FileEditToolDetails>) => void,
+    ): Promise<ToolExecutionResult<FileEditToolDetails>> {
       const requestedPath = isAbsolute(params.file_path)
         ? params.file_path
         : resolve(cwd, params.file_path)

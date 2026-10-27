@@ -1,13 +1,16 @@
 import { Container, Text } from '@earendil-works/pi-tui'
 import { theme, getMarkdownTheme } from '../theme.ts'
-import type { ImageContent } from '@earendil-works/pi-ai'
 import { MarkedMarkdown } from './markedMarkdown.ts'
+
+export interface UserImagePresentation {
+  readonly mimeType: string
+}
 
 /**
  * Component that renders a user message as the start of a conversation turn.
  */
 export class UserMessage extends Container {
-  constructor(text: string, images?: ImageContent[]) {
+  constructor(text: string, images?: readonly UserImagePresentation[]) {
     super()
     this.addChild(
       new MarkedMarkdown(text, theme.fg('muted', '› '), 0, getMarkdownTheme(), {

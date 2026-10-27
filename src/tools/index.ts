@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from './contracts.ts'
 import { existsSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { Type, type Static, type TSchema } from 'typebox'
@@ -9,6 +9,7 @@ import type { Skill } from '../skill.ts'
 import { getAllToolDefinitions, getAllDeferredToolDefinitions, getCoreToolDefinitions, getToolDefaultPermissions, registerDynamicDeferredTool, registerTool, type ToolCreationContext } from './registry.ts'
 import { joinSummaryParts, producedText, statusPrefix, text } from './summary.ts'
 import { TOOL_SEARCH_TOOL_NAME } from './ToolSearchTool/ToolSearchTool.ts'
+import { TOOL_CONTROL_TOOL_NAME } from './ToolControlTool/ToolControlTool.ts'
 import { TOOL_NAME as VISION_TOOL_NAME } from './VisionTool/VisionTool.ts'
 import { TOOL_NAME as WORKTREE_TOOL_NAME } from './GitWorkTreeTool/GitWorkTreeTool.ts'
 
@@ -33,13 +34,13 @@ export interface SkillToolOptions {
   getSkills: () => Skill[]
 }
 
-export function createSkillToolWithAgent(options: SkillToolOptions): AgentTool<typeof skillSchema, SkillToolDetails> {
+export function createSkillToolWithAgent(options: SkillToolOptions): ToolAdapter<typeof skillSchema, SkillToolDetails> {
   return {
     name: SKILL_TOOL_NAME,
     label: 'Skill',
     description: 'Execute a skill by name. Skills are specialized instructions for specific tasks.',
     parameters: skillSchema,
-    async execute(_toolCallId: string, params: SkillToolInput): Promise<AgentToolResult<SkillToolDetails>> {
+    async execute(_toolCallId: string, params: SkillToolInput): Promise<ToolExecutionResult<SkillToolDetails>> {
       const normalizedSkill = params.skill.trim()
       const skills = options.getSkills()
       const skill = skills.find((candidate) => candidate.name === normalizedSkill)
@@ -89,14 +90,14 @@ function jsonSchemaToTypeBox(inputSchema: Record<string, any>): TSchema {
   return Type.Object({}, { description: inputSchema.description })
 }
 
-export function createMcpTool(clientManager: McpClientManager, toolInfo: McpToolInfo): AgentTool {
+export function createMcpTool(clientManager: McpClientManager, toolInfo: McpToolInfo): ToolAdapter {
   const schema = jsonSchemaToTypeBox(toolInfo.inputSchema)
   return {
     name: `mcp__${toolInfo.serverName}__${toolInfo.name}`,
     label: `MCP: ${toolInfo.name}`,
     description: `[MCP:${toolInfo.serverName}] ${toolInfo.description}`,
     parameters: schema,
-    async execute(_toolCallId, params, _signal, onUpdate): Promise<AgentToolResult<any>> {
+    async execute(_toolCallId, params, _signal, onUpdate): Promise<ToolExecutionResult<any>> {
       onUpdate?.({ content: [{ type: 'text', text: `Calling ${toolInfo.serverName}/${toolInfo.name}...` }], details: {} })
       try {
         const result = await clientManager.callTool(toolInfo.serverName, toolInfo.name, params as Record<string, any>)
@@ -109,7 +110,7 @@ export function createMcpTool(clientManager: McpClientManager, toolInfo: McpTool
   }
 }
 
-export function createMcpTools(clientManager: McpClientManager): AgentTool[] {
+export function createMcpTools(clientManager: McpClientManager): ToolAdapter[] {
   return clientManager.getAllTools().map((toolInfo) => createMcpTool(clientManager, toolInfo))
 }
 
@@ -125,12 +126,11 @@ export function registerMcpToolsAsDeferred(clientManager: McpClientManager): voi
         schema: formatMcpInputSchema(toolInfo.inputSchema),
         shouldDefer: true,
       },
-      presentation: {},
     })
   }
 }
 
-export function createReadMcpResourceTool(clientManager: McpClientManager): AgentTool {
+export function createReadMcpResourceTool(clientManager: McpClientManager): ToolAdapter {
   return {
     name: 'mcp__read_resource',
     label: 'MCP: Read Resource',
@@ -139,7 +139,7 @@ export function createReadMcpResourceTool(clientManager: McpClientManager): Agen
       server: Type.String({ description: 'The MCP server name that provides the resource' }),
       uri: Type.String({ description: 'The resource URI to read' }),
     }),
-    async execute(_toolCallId, params): Promise<AgentToolResult<any>> {
+    async execute(_toolCallId, params): Promise<ToolExecutionResult<any>> {
       try {
         const args = params as Record<string, any>
         const result = await clientManager.readResource(args.server, args.uri)
@@ -155,13 +155,13 @@ export function createReadMcpResourceTool(clientManager: McpClientManager): Agen
   }
 }
 
-export function createListMcpResourcesTool(clientManager: McpClientManager): AgentTool {
+export function createListMcpResourcesTool(clientManager: McpClientManager): ToolAdapter {
   return {
     name: 'mcp__list_resources',
     label: 'MCP: List Resources',
     description: 'List available resources from connected MCP servers. Optionally filter by server name.',
     parameters: Type.Object({ server: Type.Optional(Type.String({ description: 'Optional server name to filter resources by' })) }),
-    async execute(_toolCallId, params): Promise<AgentToolResult<any>> {
+    async execute(_toolCallId, params): Promise<ToolExecutionResult<any>> {
       const args = params as Record<string, any>
       const resources = clientManager.getAllResources()
       const content = (args.server ? resources.filter((resource) => resource.serverName === args.server) : resources)
@@ -186,6 +186,7 @@ import './FileEditTool/index.ts'
 import './FileWriteTool/index.ts'
 import './FileReadTool/index.ts'
 import './ToolSearchTool/index.ts'
+import './ToolControlTool/index.ts'
 import './AskUserQuestionTool/index.ts'
 import './GrepTool/index.ts'
 import './GlobTool/index.ts'
@@ -195,12 +196,13 @@ import './VisionTool/index.ts'
 import './TaskTool/index.ts'
 
 // Re-exports for backward compatibility
-export { createBashTool, TOOL_DEFAULT_PERMISSION as BASH_DEFAULT_PERMISSION } from './BashTool/BashTool.ts'
-export { createFileReadTool, TOOL_DEFAULT_PERMISSION as FILE_READ_DEFAULT_PERMISSION } from './FileReadTool/FileReadTool.ts'
-export { createFileWriteTool, TOOL_DEFAULT_PERMISSION as FILE_WRITE_DEFAULT_PERMISSION } from './FileWriteTool/FileWriteTool.ts'
-export { createFileEditTool, TOOL_DEFAULT_PERMISSION as FILE_EDIT_DEFAULT_PERMISSION } from './FileEditTool/FileEditTool.ts'
+export { createBashTool, TOOL_NAME as BASH_TOOL_NAME, TOOL_DEFAULT_PERMISSION as BASH_DEFAULT_PERMISSION } from './BashTool/BashTool.ts'
+export { createFileReadTool, TOOL_NAME as FILE_READ_TOOL_NAME, TOOL_DEFAULT_PERMISSION as FILE_READ_DEFAULT_PERMISSION } from './FileReadTool/FileReadTool.ts'
+export { createFileWriteTool, TOOL_NAME as FILE_WRITE_TOOL_NAME, TOOL_DEFAULT_PERMISSION as FILE_WRITE_DEFAULT_PERMISSION } from './FileWriteTool/FileWriteTool.ts'
+export { createFileEditTool, TOOL_NAME as FILE_EDIT_TOOL_NAME, TOOL_DEFAULT_PERMISSION as FILE_EDIT_DEFAULT_PERMISSION } from './FileEditTool/FileEditTool.ts'
 export { createToolSearchTool, TOOL_SEARCH_TOOL_NAME } from './ToolSearchTool/ToolSearchTool.ts'
 export type { ToolSearchToolOptions } from './ToolSearchTool/ToolSearchTool.ts'
+export { createToolControlTool, TOOL_CONTROL_TOOL_NAME } from './ToolControlTool/ToolControlTool.ts'
 export { createAskUserQuestionTool, ASK_USER_QUESTION_TOOL_NAME } from './AskUserQuestionTool/AskUserQuestionTool.ts'
 export { createGrepTool, TOOL_NAME as GREP_TOOL_NAME, TOOL_DEFAULT_PERMISSION as GREP_DEFAULT_PERMISSION } from './GrepTool/GrepTool.ts'
 export { createGlobTool, TOOL_NAME as GLOB_TOOL_NAME, TOOL_DEFAULT_PERMISSION as GLOB_DEFAULT_PERMISSION } from './GlobTool/GlobTool.ts'
@@ -235,10 +237,10 @@ export interface CreateCodingToolsOptions {
   toolContext?: ToolCreationContext
 }
 
-export function createCodingTools(options: CreateCodingToolsOptions): AgentTool<any, any>[] {
+export function createCodingTools(options: CreateCodingToolsOptions): ToolAdapter<any, any>[] {
   const { cwd, getSkills, includeDeferred = false, modelSupportsImages = true, toolContext } = options
 
-  const tools: AgentTool<any, any>[] = []
+  const tools: ToolAdapter<any, any>[] = []
 
   // Create tools from registry (excluding skill, which needs special handling)
   const defs = includeDeferred ? getAllToolDefinitions() : getCoreToolDefinitions()
@@ -246,6 +248,8 @@ export function createCodingTools(options: CreateCodingToolsOptions): AgentTool<
     if (def.name === SKILL_TOOL_NAME) continue
     // Skip ToolSearchTool placeholder — it's created separately in agent.ts
     if (def.name === TOOL_SEARCH_TOOL_NAME) continue
+    // Skip ToolControlTool placeholder — it is bound to the current AgentToolManager.
+    if (def.name === TOOL_CONTROL_TOOL_NAME) continue
     // Skip vision tool if model doesn't support images
     if (def.name === VISION_TOOL_NAME && !modelSupportsImages) continue
     tools.push(def.agent.create(cwd, toolContext))
@@ -271,11 +275,7 @@ export function createCodingTools(options: CreateCodingToolsOptions): AgentTool<
         extractMatchContent: (input) =>
           typeof input.skill === 'string' ? input.skill : undefined,
       },
-      presentation: {
-        status: ({ input }) =>
-          typeof input.skill === 'string' ? `Loading: ${input.skill}` : 'Loading skill...',
-      },
-    })
+    }, { replaceExisting: true })
     tools.push(createSkillToolWithAgent({ getSkills }))
   }
 

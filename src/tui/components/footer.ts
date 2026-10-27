@@ -1,7 +1,7 @@
 import { type Component, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui'
 import chalk from 'chalk'
 import { GitBranchReader } from '../../git/index.ts'
-import type { MicrocodeAgent } from '../../agent/index.ts'
+import type { TuiAgentPort } from '../agentPort.ts'
 import { normalizeSessionTitle } from '../sessionTitle.ts'
 
 function formatTokens(count: number): string {
@@ -23,7 +23,7 @@ export class FooterComponent implements Component {
   private readonly gitBranch: GitBranchReader
 
   constructor(
-    private readonly agent: MicrocodeAgent,
+    private readonly agent: TuiAgentPort,
     private readonly cwd: string,
   ) {
     this.gitBranch = new GitBranchReader(cwd)
@@ -71,7 +71,7 @@ export class FooterComponent implements Component {
       ? chalk.hex('#00d7ff')(` • ${snapshot.thinkingLevel}`)
       : ''
     const rightSide = chalk.hex('#666666')(
-      `(${snapshot.model.provider}) ${snapshot.model.id}`,
+      `(${snapshot.model.provider_id}) ${snapshot.model.model_id}`,
     ) + thinking
 
     const statsLeftWidth = visibleWidth(statsLeft)

@@ -1,6 +1,5 @@
 import { registerTool } from '../registry.ts'
 import { createVisionTool, TOOL_NAME, TOOL_DEFAULT_PERMISSION } from './VisionTool.ts'
-import { VisionToolUI } from './UI.tsx'
 import { joinSummaryParts, statusPrefix, text } from '../summary.ts'
 
 registerTool({
@@ -23,10 +22,5 @@ registerTool({
         text(details.source), text(details.sourceType), text(details.mimeType),
       ])}`
     },
-  },
-  presentation: {
-    View: VisionToolUI,
-    activity: () => 'Analyzing image',
-    status: () => 'Analyzing image...',
   },
 })

@@ -1,7 +1,5 @@
 import { registerTool } from '../registry.ts'
 import { createWebSearchTool, TOOL_DEFAULT_PERMISSION, TOOL_NAME } from './WebSearchTool.ts'
-import { WebSearchToolUI } from './UI.tsx'
-import { preview } from '../../utils/displayUtils.ts'
 import { joinSummaryParts, statusPrefix } from '../summary.ts'
 
 registerTool({
@@ -21,20 +19,6 @@ registerTool({
         ? `top: ${results.slice(0, 3).map((item: any) => item.title || item.url).filter(Boolean).join('; ')}`
         : undefined
       return `[WebSearch] ${statusPrefix(context)}${joinSummaryParts([query, `${results.length} results`, top])}`
-    },
-  },
-  presentation: {
-    View: WebSearchToolUI,
-    activity: ({ input }) =>
-      typeof input.query === 'string'
-        ? `Searching ${input.query}`
-        : 'Searching the web',
-    detail: ({ input }) =>
-      typeof input.query === 'string' ? preview(input.query, 42) : 'web search',
-    status: ({ details }) => {
-      if (!details) return 'Searching...'
-      const results = Array.isArray(details.results) ? details.results.length : undefined
-      return results !== undefined && results > 0 ? `${results} results` : undefined
     },
   },
 })

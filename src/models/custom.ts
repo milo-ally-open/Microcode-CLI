@@ -96,6 +96,17 @@ export function loadCustomModels(cwd?: string): CustomModelDef[] {
   return [...merged.values()]
 }
 
+/** Keep legacy configuration intact while explaining that custom providers are disabled. */
+export function getUnsupportedCustomModelDiagnostics(cwd?: string): string[] {
+  const models = loadCustomModels(cwd)
+  if (models.length === 0) return []
+
+  const listed = models.slice(0, 20).map((model) => `custom/${model.id}`)
+  const omitted = models.length - listed.length
+  const entries = omitted > 0 ? `${listed.join(', ')} (+${omitted} more)` : listed.join(', ')
+  return [`Unsupported legacy model configuration is retained but disabled by the current provider allowlist: ${entries}. See docs/specs/runtime-architecture/model-provider-guide.md.`]
+}
+
 // ============================================================================
 // Convert to Model<Api>
 // ============================================================================

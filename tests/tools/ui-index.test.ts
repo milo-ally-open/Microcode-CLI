@@ -11,19 +11,20 @@ import '../../src/tools/ToolSearchTool/index.ts'
 import '../../src/tools/VisionTool/index.ts'
 import '../../src/tools/WebFetchTool/index.ts'
 import '../../src/tools/WebSearchTool/index.ts'
-import { AskUserQuestionToolUI } from '../../src/tools/AskUserQuestionTool/UI.tsx'
-import { BashToolUI } from '../../src/tools/BashTool/UI.tsx'
-import { FileEditToolUI } from '../../src/tools/FileEditTool/UI.tsx'
-import { FileReadToolUI } from '../../src/tools/FileReadTool/UI.tsx'
-import { FileWriteToolUI } from '../../src/tools/FileWriteTool/UI.tsx'
-import { GlobToolUI } from '../../src/tools/GlobTool/UI.tsx'
-import { GrepToolUI } from '../../src/tools/GrepTool/UI.tsx'
-import { TaskToolUI } from '../../src/tools/TaskTool/UI.tsx'
-import { VisionToolUI } from '../../src/tools/VisionTool/UI.tsx'
-import { WebFetchToolUI } from '../../src/tools/WebFetchTool/UI.tsx'
-import { WebSearchToolUI } from '../../src/tools/WebSearchTool/UI.tsx'
-import { formatToolActivity, formatToolDetail, formatToolStatus, formatToolSummary, getToolDefinition } from '../../src/tools/registry.ts'
-import { ToolPreviewController } from '../../src/tools/previewController.ts'
+import { AskUserQuestionToolUI } from '../../src/tui/toolViews/AskUserQuestion.tsx'
+import { BashToolUI } from '../../src/tui/toolViews/Bash.tsx'
+import { FileEditToolUI } from '../../src/tui/toolViews/FileEdit.tsx'
+import { FileReadToolUI } from '../../src/tui/toolViews/FileRead.tsx'
+import { FileWriteToolUI } from '../../src/tui/toolViews/FileWrite.tsx'
+import { GlobToolUI } from '../../src/tui/toolViews/Glob.tsx'
+import { GrepToolUI } from '../../src/tui/toolViews/Grep.tsx'
+import { TaskToolUI } from '../../src/tui/toolViews/Task.tsx'
+import { VisionToolUI } from '../../src/tui/toolViews/Vision.tsx'
+import { WebFetchToolUI } from '../../src/tui/toolViews/WebFetch.tsx'
+import { WebSearchToolUI } from '../../src/tui/toolViews/WebSearch.tsx'
+import { formatToolSummary, getToolDefinition } from '../../src/tools/registry.ts'
+import { formatToolActivity, formatToolDetail, formatToolStatus, getToolUIConstructor } from '../../src/tui/toolPresentationRegistry.ts'
+import { ToolPreviewController } from '../../src/tui/toolPreviewController.ts'
 import { ToolExecutionComponent } from '../../src/tui/components/toolExecution.ts'
 
 function renderText(ui: any): string {
@@ -39,9 +40,9 @@ function complete(content = 'done', isError = false) {
 }
 
 describe('tool UI and registration modules', () => {
-  test('registered tool index modules expose descriptions, formatters, and UI constructors', () => {
+  test('tool execution metadata and TUI presentation registry stay independently addressable', () => {
     const read = getToolDefinition('read')!
-    expect(read.presentation.View).toBe(FileReadToolUI)
+    expect(getToolUIConstructor('read')).toBe(FileReadToolUI)
     expect(formatToolActivity('read', { file_path: 'src/a.ts' })).toContain('Reading')
     expect(formatToolDetail('read', { file_path: 'src/a.ts' })).toBe('a.ts')
     expect(formatToolStatus('read', { file_path: 'a' }, { returnedLines: 1, totalLines: 2 })).toBe('1/2 lines')

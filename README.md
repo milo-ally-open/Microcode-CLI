@@ -24,7 +24,7 @@
 
 - **Work in the terminal:** stream assistant responses alongside tool activity in a persistent conversation.
 - **Understand and change code:** search and read project files, make edits, and run shell commands through configurable permission modes.
-- **Choose your model:** use supported built-in providers or define custom models; adjust thinking depth per request.
+- **Choose your model:** use OpenAI Codex OAuth, OpenAI GPT API keys, or DeepSeek API keys; adjust thinking depth per request.
 - **Extend the workflow:** load repository guidance, Skills, MCP servers, and Microcode plugins.
 - **Pick up where you left off:** save sessions locally, resume them with rendered conversation history, and scroll through long runs.
 - **Handle Git interactively:** inspect changes, manage branches and staging, commit, fetch, pull, push, and work with stashes.
@@ -155,20 +155,19 @@ Autocomplete menus appear above the input. While viewing older conversation hist
 
 ## Models and authentication
 
-The model's API protocol determines the environment variables used for its API key, base URL, and optional model override:
+The initial upstream provider allowlist is intentionally small:
 
-| Protocol | API key | Base URL | Model override |
+| Provider | Authentication | Environment variables |
 |---|---|---|---|
-| OpenAI-compatible completions | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `OPENAI_MODEL` |
-| Anthropic Messages | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | `ANTHROPIC_MODEL` |
-| Google Generative AI | `GEMINI_API_KEY` | `GEMINI_BASE_URL` | `GEMINI_MODEL` |
-| Fallback | `API_KEY` | `BASE_URL` | `MODEL` |
+| OpenAI Codex | Pi-managed OAuth | — |
+| OpenAI GPT | `OPENAI_API_KEY` | `OPENAI_BASE_URL`, `OPENAI_MODEL` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `OPENAI_BASE_URL`, `DEEPSEEK_MODEL` |
 
-Provider sign-in is also available through `/login`; use `/auth` to inspect authentication status. Built-in models and authentication methods are sourced from the pinned Pi packages. To see the catalog available in your build, run `microcode model list`.
+Use `/login openai-codex` for Codex OAuth, or set the API key variable for OpenAI or DeepSeek. `BASE_URL` overrides the selected model's endpoint, and `MODEL` selects the default model. Generic `API_KEY` and keys for other upstream providers are not used. Built-in model metadata and authentication flows come from the Pi version pinned by this repository. Run `microcode model list` to see the catalog available in your build.
 
 ### Custom models
 
-Add models to `~/.microcode/config.json` for your user account or `.microcode/config.json` for the current project. Project definitions take precedence over user definitions with the same ID.
+Legacy custom model entries in `~/.microcode/config.json` or `.microcode/config.json` are retained, but the current provider allowlist disables them. Microcode reports a diagnostic when it finds these entries; they are not listed or used for inference. The example below documents the existing config shape for migration/reference only:
 
 ```json
 {
@@ -188,13 +187,15 @@ Add models to `~/.microcode/config.json` for your user account or `.microcode/co
 }
 ```
 
-Supported `api` values are `openai-completions`, `anthropic-messages`, and `google-generative-ai`. Optional fields include `apiKeyEnv`, `reasoning`, `thinkingFormat`, `input` (for example, `["text", "image"]`), `headers`, and display-only `cost`. Custom models are available in `/model` and `microcode model list`.
+The supported custom-model `api` values and fields belong to the legacy config format. These models are not currently available in `/model` or `microcode model list`. See [the runtime architecture model-provider guide](docs/specs/runtime-architecture/model-provider-guide.md) for the approved provider policy and the reviewed path for adding support.
 
 See [the model integration and gateway spec](docs/specs/model_intergration_spec.md) for the model catalog, authentication, direct integration, and harness-independent gateway design.
 
-## Model gateway
+## CLI runtime and Model Gateway
 
-By default, `microcode` starts or reuses a per-user loopback Model Gateway, performs a health/model-list/private-RPC handshake, and routes model generation through it. A successful handshake prints the protocol version and model count. If startup or the handshake fails, Microcode prints the failure and explicitly falls back to the existing direct, in-process Pi path for that session. Use `microcode --no-daemon` to select that path intentionally. The gateway is an inference service; external harnesses continue to own their tools, approvals, prompts, and sessions.
+By default, `microcode` starts or reuses a project-scoped Bun runtime service on an authenticated loopback endpoint. That service owns the Agent, model/provider access, tools, permissions, session persistence, Skills, MCP, and Plugin lifecycle; the Chalk TUI communicates with it through versioned HTTP commands and an SSE event stream. If the runtime cannot start or connect, Microcode reports the error and exits. Use `microcode --no-daemon` to run the Agent and its session in the current process.
+
+The CLI also starts or connects to the separate Model Gateway for provider catalog and authentication controls. The Gateway remains available to external clients that need OpenAI Chat Completions, OpenAI Responses, Gemini Generate Content, or Anthropic Messages compatibility. It does not own a Microcode TUI session or execute Microcode tools. Gateway bind settings and security limits below apply only to that external API service; the local runtime API always binds to loopback and uses a separate token.
 
 The initial service listens on `127.0.0.1:43127`. Host and port can be configured independently. For each setting, precedence is command-line option, environment variable, `~/.microcode/config.json`, then the default:
 
@@ -226,7 +227,16 @@ microcode gateway token --rotate  # rotate while stopped, then print the new cli
 microcode gateway stop
 ```
 
-The service exposes `GET /v1/models`, OpenAI Chat Completions at `/v1/chat/completions`, OpenAI Responses at `/v1/responses`, and Anthropic Messages at `/v1/messages`. Use the printed gateway token as Bearer auth for OpenAI-compatible clients or `x-api-key` for Anthropic-compatible clients. Model IDs use `provider/model` from `/v1/models`. The public token is separate from upstream provider credentials and the private TUI RPC token. Stop the gateway before rotating the public token; rotation refuses to invalidate credentials used by a running daemon.
+The service exposes `GET /v1/models`, OpenAI Chat Completions at `/v1/chat/completions`, OpenAI Responses at `/v1/responses`, Anthropic Messages at `/v1/messages`, and the supported Gemini Generate Content subset at `/v1beta/models/{provider}/{model}:generateContent` and `:streamGenerateContent`. Use the printed gateway token as Bearer auth for OpenAI clients, `x-api-key` for Anthropic clients, or `x-goog-api-key` for Gemini clients. Gemini uses the same `provider/model` IDs returned by `/v1/models`. Its current adapter supports text, inline base64 images when the selected model accepts images, function tools, basic generation settings, and SSE generation; structured JSON outputs, forced function selection, and unsupported modalities return a clear error. The public token is separate from upstream provider credentials and the private TUI RPC token. Stop the gateway before rotating the public token; rotation refuses to invalidate credentials used by a running daemon.
+
+Example Gemini-compatible request using a DeepSeek model from the gateway catalog:
+
+```bash
+curl --fail http://127.0.0.1:43127/v1beta/models/deepseek/deepseek-v4-pro:generateContent \
+  -H "x-goog-api-key: $MICROCODE_GATEWAY_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"contents":[{"role":"user","parts":[{"text":"Explain what a reverse proxy does in one sentence."}]}]}'
+```
 
 ### Use Microcode as a local or private-network API relay
 
@@ -279,7 +289,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="anthropic/claude-sonnet-4-20250514",  # Replace with an id from GET /v1/models.
+    model="deepseek/deepseek-v4-pro",  # Replace with an id from GET /v1/models.
     max_tokens=256,
     messages=[{"role": "user", "content": "Explain what a reverse proxy does in one sentence."}],
 )
@@ -356,6 +366,8 @@ Standalone MCP configuration can live in `~/.microcode/config.json` or `.microco
 ```
 
 Directory packages are also supported: put an `mcp.json` containing an `mcpServers` object under `~/.microcode/mcp/<package>/` or `.microcode/mcp/<package>/`. Supported transports include local stdio and secure remote MCP endpoints. Microcode discovers and connects configured servers at startup; `/mcp` shows runtime status and `microcode mcp list` lists discovered configuration. MCP tools still follow Microcode's permission policy. MCP `env` and `headers` values are stored as configuration strings: keep credentials in local, untracked configuration and do not commit them.
+
+The Agent starts with a small tool set: file read/write/edit, shell, grep/glob, Ask, Skill, and tool search. Other built-in tools such as web search/fetch, vision, task, and worktree are registered but disabled by default. The Agent can use `tool_control` to list its registered tool IDs and enable or disable a tool for the current session. This only changes tool availability; every execution still follows the normal permission policy.
 
 ## Permissions
 

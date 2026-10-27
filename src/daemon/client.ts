@@ -13,8 +13,10 @@ import {
   type TranscriptContext,
 } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
+import { toModelInferenceContext, toPiAssistantMessage, toPiAssistantMessageEvent } from '../kernel/pi/modelAdapter.ts'
+import type { ModelCompletion, ModelStreamEvent } from '../models/inference.ts'
 import type { GatewayConnection } from './lifecycle.ts'
-import { GATEWAY_PROTOCOL_VERSION } from './server.ts'
+import { GATEWAY_PROTOCOL_VERSION, GATEWAY_RPC_PROTOCOL_VERSION } from './server.ts'
 import type { GatewayModelDescriptor, GatewayProviderDescriptor } from './types.ts'
 
 interface ProjectModelCatalog {
@@ -164,10 +166,10 @@ export class GatewayClient {
       method: 'GET',
       headers: {
         authorization: `Bearer ${this.connection.rpcToken}`,
-        'x-microcode-rpc-version': String(GATEWAY_PROTOCOL_VERSION),
+        'x-microcode-rpc-version': String(GATEWAY_RPC_PROTOCOL_VERSION),
       },
     }, 'Gateway private RPC handshake')
-    if (rpc.status !== 'ok' || rpc.protocol_version !== GATEWAY_PROTOCOL_VERSION) {
+    if (rpc.status !== 'ok' || rpc.protocol_version !== GATEWAY_RPC_PROTOCOL_VERSION) {
       throw new Error('Gateway private RPC handshake returned an incompatible response.')
     }
 
@@ -182,7 +184,7 @@ export class GatewayClient {
         method: 'GET',
         headers: {
           authorization: `Bearer ${this.connection.rpcToken}`,
-          'x-microcode-rpc-version': String(GATEWAY_PROTOCOL_VERSION),
+          'x-microcode-rpc-version': String(GATEWAY_RPC_PROTOCOL_VERSION),
         },
         signal: AbortSignal.timeout(3000),
       })
@@ -212,7 +214,7 @@ export class GatewayClient {
   private internalHeaders(jsonBody = false): HeadersInit {
     return {
       authorization: `Bearer ${this.connection.rpcToken}`,
-      'x-microcode-rpc-version': String(GATEWAY_PROTOCOL_VERSION),
+      'x-microcode-rpc-version': String(GATEWAY_RPC_PROTOCOL_VERSION),
       ...(jsonBody ? { 'content-type': 'application/json' } : {}),
     }
   }
@@ -403,12 +405,12 @@ export class GatewayClient {
   async completeSimple(model: Model<Api>, context: Context, options?: SimpleStreamOptions): Promise<AssistantMessage> {
     const response = await this.fetchFn(this.url('/internal/v1/complete'), {
       method: 'POST',
-      headers: { authorization: `Bearer ${this.connection.rpcToken}`, 'content-type': 'application/json', 'x-microcode-rpc-version': String(GATEWAY_PROTOCOL_VERSION) },
-      body: JSON.stringify({ model: `${model.provider}/${model.id}`, cwd: this.projectCwd, context, options: rpcOptions(options) }),
+      headers: { authorization: `Bearer ${this.connection.rpcToken}`, 'content-type': 'application/json', 'x-microcode-rpc-version': String(GATEWAY_RPC_PROTOCOL_VERSION) },
+      body: JSON.stringify({ model: `${model.provider}/${model.id}`, cwd: this.projectCwd, context: toModelInferenceContext(context), options: rpcOptions(options) }),
       signal: options?.signal,
     })
     if (!response.ok) throw await gatewayRpcError(response, 'completion')
-    return await response.json() as AssistantMessage
+    return toPiAssistantMessage(await response.json() as ModelCompletion)
   }
 
   streamSimple: StreamFn = (model, context, options) => {
@@ -426,8 +428,8 @@ export class GatewayClient {
     try {
       const response = await this.fetchFn(this.url('/internal/v1/stream'), {
         method: 'POST',
-        headers: { authorization: `Bearer ${this.connection.rpcToken}`, 'content-type': 'application/json', 'x-microcode-rpc-version': String(GATEWAY_PROTOCOL_VERSION) },
-        body: JSON.stringify({ model: `${model.provider}/${model.id}`, cwd: this.projectCwd, context, options: rpcOptions(options) }),
+        headers: { authorization: `Bearer ${this.connection.rpcToken}`, 'content-type': 'application/json', 'x-microcode-rpc-version': String(GATEWAY_RPC_PROTOCOL_VERSION) },
+        body: JSON.stringify({ model: `${model.provider}/${model.id}`, cwd: this.projectCwd, context: toModelInferenceContext(context), options: rpcOptions(options) }),
         signal: options?.signal,
       })
       if (!response.ok) throw await gatewayRpcError(response, 'stream')
@@ -444,12 +446,13 @@ export class GatewayClient {
         for (const rawLine of lines) {
           const line = rawLine.trim()
           if (!line) continue
-          const event = JSON.parse(line) as AssistantMessageEvent | { type: 'rpc_error'; message?: string }
-          if (event.type === 'rpc_error') {
-            stream.push({ type: 'error', reason: 'error', error: failedMessage(model, event.message ?? 'Model Gateway request failed.') })
+          const frame = JSON.parse(line) as ModelStreamEvent | { type: 'rpc_error'; message?: string }
+          if (frame.type === 'rpc_error') {
+            stream.push({ type: 'error', reason: 'error', error: failedMessage(model, frame.message ?? 'Model Gateway request failed.') })
             terminal = true
             break
           }
+          const event = toPiAssistantMessageEvent(frame)
           stream.push(event)
           if (event.type === 'done' || event.type === 'error') terminal = true
         }

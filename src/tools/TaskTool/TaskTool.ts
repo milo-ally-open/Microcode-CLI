@@ -1,6 +1,5 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult, ToolTaskPersistence } from '../contracts.ts'
 import { Type, type Static } from 'typebox'
-import type { AgentSessionPersistence } from '../../agent/persistence.ts'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 import type { TaskList } from '../../tasks/TaskSystem.ts'
 
@@ -90,9 +89,9 @@ export interface TaskToolDetails {
 }
 
 function requirePersistence(
-  getPersistence: () => AgentSessionPersistence | undefined,
-): AgentSessionPersistence & Required<Pick<
-  AgentSessionPersistence,
+  getPersistence: () => ToolTaskPersistence | undefined,
+): ToolTaskPersistence & Required<Pick<
+  ToolTaskPersistence,
   'createTaskList' | 'claimTaskList' | 'markTask'
 >> {
   const persistence = getPersistence()
@@ -103,8 +102,8 @@ function requirePersistence(
   ) {
     throw new Error('TaskSystem is unavailable because no session persistence is configured.')
   }
-  return persistence as AgentSessionPersistence & Required<Pick<
-    AgentSessionPersistence,
+  return persistence as ToolTaskPersistence & Required<Pick<
+    ToolTaskPersistence,
     'createTaskList' | 'claimTaskList' | 'markTask'
   >>
 }
@@ -172,9 +171,9 @@ function requireString(value: string | undefined, field: string, action: string)
 export function createTaskTool(
   _cwd: string,
   options: {
-    getPersistence?: () => AgentSessionPersistence | undefined
+    getPersistence?: () => ToolTaskPersistence | undefined
   } = {},
-): AgentTool<typeof taskSchema, TaskToolDetails> {
+): ToolAdapter<typeof taskSchema, TaskToolDetails> {
   const getPersistence = options.getPersistence ?? (() => undefined)
 
   return {
@@ -187,8 +186,8 @@ export function createTaskTool(
       _toolCallId: string,
       params: TaskToolInput,
       _signal?: AbortSignal,
-      onUpdate?: (partial: AgentToolResult<TaskToolDetails>) => void,
-    ): Promise<AgentToolResult<TaskToolDetails>> {
+      onUpdate?: (partial: ToolExecutionResult<TaskToolDetails>) => void,
+    ): Promise<ToolExecutionResult<TaskToolDetails>> {
       const persistence = requirePersistence(getPersistence)
 
       onUpdate?.({

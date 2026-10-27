@@ -1,11 +1,5 @@
-import type {
-  AgentEvent,
-  AgentMessage,
-  StreamFn,
-  ThinkingLevel,
-} from '@earendil-works/pi-agent-core'
-import type { Api, Model, Models } from '@earendil-works/pi-ai'
-import type { ModelConfig } from '../models/index.ts'
+import type { AgentModelConfig } from './AgentModelManager.ts'
+import type { RuntimeModelSource } from '../runtime/modelProjection.ts'
 import type { McpServerState } from '../mcp/types.ts'
 import type {
   EffectivePolicy,
@@ -13,7 +7,7 @@ import type {
   PermissionMode,
   PermissionSnapshot,
 } from '../permissions/index.ts'
-import type { CompactionProgress } from '../session/CompactionManager.ts'
+import type { CompactionProgress, CompactionSettings, CompactionSummaryGenerator } from '../session/CompactionManager.ts'
 import type { AgentTokenSnapshot } from './AgentTokenTracker.ts'
 import type { AgentModelSnapshot } from './AgentModelManager.ts'
 import type { AgentToolSnapshot } from './AgentToolManager.ts'
@@ -21,10 +15,8 @@ import type { AgentSkillSnapshot } from './AgentSkillManager.ts'
 import type { AgentSessionPersistence } from './persistence.ts'
 import type { ProjectInstructions } from '../instructions/projectInstructions.ts'
 import type { Skill } from '../skill.ts'
-import type {
-  CompactionSettings,
-  generateSummary,
-} from '@earendil-works/pi-agent-core'
+import type { RuntimeModelDescriptor, RuntimeThinkingLevel } from '../runtime/contracts.ts'
+import type { KernelAgentEvent } from '../kernel/contracts.ts'
 
 export interface AgentIdentity {
   id: string
@@ -43,37 +35,42 @@ export interface AgentPermissionConfig {
     toolName: string,
     input: Record<string, unknown>,
     description: string,
+    requestId: string,
+    preview?: Record<string, unknown>,
   ) => Promise<boolean>
   onAskUserQuestion?: (
     toolName: string,
     input: Record<string, unknown>,
+    requestId: string,
   ) => Promise<{ answers?: Record<string, string>; block?: boolean }>
 }
 
-export interface CreateMicrocodeAgentOptions {
+export interface CreateMicrocodeAgentOptions<
+  Message = unknown,
+  Model extends RuntimeModelSource = RuntimeModelSource,
+> {
   cwd?: string
   projectInstructions?: ProjectInstructions
   modelId?: string
   /** Protocol format (e.g., "anthropic-messages", "openai-completions"). Must match the model ID. */
-  api?: Api
-  thinkingLevel?: ThinkingLevel
+  api?: string
+  thinkingLevel?: RuntimeThinkingLevel
   mcpServers?: McpServerState[]
   onCompactionProgress?: (progress: CompactionProgress) => void
   permission?: AgentPermissionConfig
   skillPaths?: string[]
   pluginSkills?: Skill[]
   pluginDiagnostics?: string[]
+  /** Backend-owned plugin mention expansion, invoked with the original user text. */
+  pluginPromptContext?: (input: string, scanText: string) => string
   identity?: CreateAgentIdentity
-  persistence?: AgentSessionPersistence
-  generateSummaryFn?: typeof generateSummary
+  persistence?: AgentSessionPersistence<Message>
+  summarize?: CompactionSummaryGenerator<Message>
   compactionSettings?: Partial<CompactionSettings>
-  streamFn?: StreamFn
-  /** Optional generation client. Defaults to the existing in-process Pi Models collection. */
-  models?: Models
-  /** Optional transport-owned initial selection and resolver for daemon-backed model catalogs. */
-  initialModelConfig?: ModelConfig
-  resolveModelConfig?: (modelId: string, api?: Api, provider?: string) => ModelConfig
-  resolveModelApiKey?: (model: Model<Api>) => string | undefined
+  /** Optional transport-owned initial selection and resolver for the active model runtime. */
+  initialModelConfig?: AgentModelConfig<Model>
+  resolveModelConfig?: (modelId: string, api?: string, provider?: string) => AgentModelConfig<Model>
+  resolveModelApiKey?: (model: Model) => string | undefined
 }
 
 export interface CompactAgentOptions {
@@ -81,21 +78,21 @@ export interface CompactAgentOptions {
   persistToSession?: boolean
 }
 
-export interface AgentCompactionResult {
+export interface AgentCompactionResult<Message = unknown> {
   readonly summary: string
   readonly tokensBefore: number
   readonly tokensAfter: number
   readonly keptMessageCount: number
-  readonly messages: readonly AgentMessage[]
+  readonly messages: readonly Message[]
   readonly automatic: boolean
 }
 
 export interface MicrocodeAgentSnapshot {
   readonly identity: Readonly<AgentIdentity>
   readonly cwd: string
-  readonly model: Readonly<Model<Api>>
+  readonly model: RuntimeModelDescriptor
   readonly modelConfig: Readonly<AgentModelSnapshot>
-  readonly thinkingLevel: ThinkingLevel
+  readonly thinkingLevel: RuntimeThinkingLevel
   readonly systemPrompt: string
   readonly messageCount: number
   readonly toolNames: readonly string[]
@@ -113,13 +110,15 @@ type WithAgentId<T> = T extends unknown
   ? T & { readonly agentId: string }
   : never
 
-export type MicrocodeAgentCoreEvent = WithAgentId<AgentEvent>
+export type MicrocodeAgentCoreEvent<Message = unknown> = WithAgentId<KernelAgentEvent<Message>>
 
 export interface AgentPermissionRequest {
+  readonly requestId: string
   readonly kind: 'tool' | 'question'
   readonly toolName: string
   readonly input: Readonly<Record<string, unknown>>
   readonly description?: string
+  readonly preview?: Readonly<Record<string, unknown>>
 }
 
 export type AgentStateChangeReason =
@@ -134,8 +133,8 @@ export type AgentStateChangeReason =
   | 'skills_changed'
   | 'compaction_completed'
 
-export type MicrocodeAgentEvent =
-  | MicrocodeAgentCoreEvent
+export type MicrocodeAgentEvent<Message = unknown> =
+  | MicrocodeAgentCoreEvent<Message>
   | {
       readonly type: 'state_changed'
       readonly agentId: string
@@ -161,8 +160,8 @@ export type MicrocodeAgentEvent =
   | {
       readonly type: 'model_changed'
       readonly agentId: string
-      readonly previous: Readonly<Model<Api>>
-      readonly current: Readonly<Model<Api>>
+      readonly previous: RuntimeModelDescriptor
+      readonly current: RuntimeModelDescriptor
     }
   | {
       readonly type: 'tool_started'
@@ -183,8 +182,8 @@ export type MicrocodeAgentEvent =
       readonly progress: Readonly<CompactionProgress>
     }
 
-export type MicrocodeAgentEventListener = (
-  event: MicrocodeAgentEvent,
+export type MicrocodeAgentEventListener<Message = unknown> = (
+  event: MicrocodeAgentEvent<Message>,
   signal: AbortSignal,
 ) => Promise<void> | void
 

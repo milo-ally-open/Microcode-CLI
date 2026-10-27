@@ -9,7 +9,6 @@
 
 import { registerTool } from '../registry.ts'
 import { createAskUserQuestionTool, TOOL_DEFAULT_PERMISSION, ASK_USER_QUESTION_TOOL_NAME } from './AskUserQuestionTool.ts'
-import { AskUserQuestionToolUI } from './UI.tsx'
 import { count, joinSummaryParts, statusPrefix } from '../summary.ts'
 
 registerTool({
@@ -55,5 +54,4 @@ registerTool({
       return undefined
     },
   },
-  presentation: { View: AskUserQuestionToolUI },
 })

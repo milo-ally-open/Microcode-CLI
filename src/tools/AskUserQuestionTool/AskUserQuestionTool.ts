@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core'
+import type { ToolAdapter, ToolExecutionResult } from '../contracts.ts'
 import { Type, type Static } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
 
@@ -73,7 +73,7 @@ export interface AskUserQuestionDetails {
  * Extended tool interface that supports pre-collected answers
  * from the permission flow.
  */
-export interface AskUserQuestionTool extends AgentTool<typeof askUserQuestionSchema, AskUserQuestionDetails> {
+export interface AskUserQuestionTool extends ToolAdapter<typeof askUserQuestionSchema, AskUserQuestionDetails> {
   /** Store answers collected during the permission flow. */
   setAnswers(answers: Record<string, string>): void
   /** Retrieve and clear stored answers (consumed on execute). */
@@ -105,8 +105,8 @@ export function createAskUserQuestionTool(_cwd: string): AskUserQuestionTool {
       _toolCallId: string,
       params: AskUserQuestionInput,
       _signal?: AbortSignal,
-      _onUpdate?: (partial: AgentToolResult<AskUserQuestionDetails>) => void,
-    ): Promise<AgentToolResult<AskUserQuestionDetails>> {
+      _onUpdate?: (partial: ToolExecutionResult<AskUserQuestionDetails>) => void,
+    ): Promise<ToolExecutionResult<AskUserQuestionDetails>> {
       const { questions } = params
 
       // Answers may come from:

@@ -1,19 +1,9 @@
-import {
-  BACKGROUND_CONTEXT,
-  generateSummary,
-  shouldCompact,
-  DEFAULT_COMPACTION_SETTINGS,
-  type CompactionSettings,
-  type AgentMessage,
-} from '@earendil-works/pi-agent-core'
-import type { Model, Models } from '@earendil-works/pi-ai'
-import { estimateMessagesTokens } from './TokenEstimator.ts'
-import { getCompactUserSummaryMessage } from './compactPrompt.ts'
-import { TOOL_NAME as BASH_TOOL_NAME } from '../tools/BashTool/BashTool.ts'
-import { TOOL_NAME as READ_TOOL_NAME } from '../tools/FileReadTool/FileReadTool.ts'
-import { TOOL_NAME as WRITE_TOOL_NAME } from '../tools/FileWriteTool/FileWriteTool.ts'
-import { TOOL_NAME as EDIT_TOOL_NAME } from '../tools/FileEditTool/FileEditTool.ts'
-import { TOOL_NAME as VISION_TOOL_NAME } from '../tools/VisionTool/VisionTool.ts'
+import type {
+  CompactionMessageAdapter,
+  CompactionSummaryGenerator,
+} from './contracts.ts'
+
+export type { CompactionSummaryGenerator } from './contracts.ts'
 
 export interface CompactionProgress {
   phase:
@@ -33,94 +23,72 @@ export interface CompactionProgress {
   totalUnits?: number
 }
 
-export interface ContextCompactionResult {
+export interface CompactionSettings {
+  enabled: boolean
+  reserveTokens: number
+  keepRecentTokens: number
+}
+
+export const DEFAULT_COMPACTION_SETTINGS: Readonly<CompactionSettings> = Object.freeze({
+  enabled: true,
+  reserveTokens: 16384,
+  keepRecentTokens: 20000,
+})
+
+export interface ContextCompactionResult<Message> {
   summary: string
-  messages: AgentMessage[]
+  messages: Message[]
   tokensBefore: number
   tokensAfter: number
   keptMessageCount: number
   automatic: boolean
 }
 
-const CLEARED_MESSAGE = '[Old tool result content cleared]'
-
-// Tool names whose results are eligible for microcompact (must match registered names in tools/*/index.ts)
-const COMPACTABLE_TOOL_NAMES = new Set([
-  BASH_TOOL_NAME,
-  READ_TOOL_NAME,
-  WRITE_TOOL_NAME,
-  EDIT_TOOL_NAME,
-  VISION_TOOL_NAME,
-])
-
-// Keep the last N tool results of each type
-const KEEP_RECENT_TOOLS = 3
-const RECENT_CONTEXT_RATIO = 0.1
-const RECENT_HISTORY_RATIO = 0.2
-
-interface ConversationUnit {
-  messages: AgentMessage[]
+export interface ConversationUnit<Message> {
+  messages: Message[]
   tokens: number
   safeToRetain: boolean
 }
 
-function getToolCallIds(message: AgentMessage): string[] {
-  if (message.role !== 'assistant') return []
-  return message.content
-    .filter((block) => block.type === 'toolCall')
-    .map((block) => block.id)
-}
+const CLEARED_MESSAGE = '[Old tool result content cleared]'
 
-function stringifyMalformedUnit(messages: readonly AgentMessage[]): string {
-  return messages.map((message) => {
-    if (message.role === 'toolResult') {
-      const content = message.content
-        .filter((block) => block.type === 'text')
-        .map((block) => block.text)
-        .join('\n')
-      return `Tool result ${message.toolName} (${message.toolCallId}): ${content}`
-    }
-    if (message.role === 'assistant') {
-      const calls = message.content
-        .filter((block) => block.type === 'toolCall')
-        .map((block) => `${block.name}(${JSON.stringify(block.arguments)})`)
-      return `Assistant requested tools: ${calls.join(', ')}`
-    }
-    return `${message.role}: ${JSON.stringify(message)}`
-  }).join('\n')
-}
+// Keep the last N tool results of each type.
+const KEEP_RECENT_TOOLS = 3
+const RECENT_CONTEXT_RATIO = 0.1
+const RECENT_HISTORY_RATIO = 0.2
 
-export function buildConversationUnits(
-  messages: readonly AgentMessage[],
-): ConversationUnit[] {
-  const units: ConversationUnit[] = []
+export function buildConversationUnits<Message>(
+  messages: readonly Message[],
+  adapter: CompactionMessageAdapter<Message>,
+): ConversationUnit<Message>[] {
+  const units: ConversationUnit<Message>[] = []
   for (let index = 0; index < messages.length;) {
     const message = messages[index]!
-    const toolCallIds = getToolCallIds(message)
-    if (toolCallIds.length === 0) {
+    const toolCalls = adapter.getToolCalls(message)
+    if (toolCalls.length === 0) {
       units.push({
         messages: [message],
-        tokens: estimateMessagesTokens([message]),
-        safeToRetain: message.role !== 'toolResult',
+        tokens: adapter.estimateTokens([message]),
+        safeToRetain: adapter.getToolResult(message) === undefined,
       })
       index++
       continue
     }
 
-    const unitMessages: AgentMessage[] = [message]
+    const unitMessages: Message[] = [message]
     const resultIds = new Set<string>()
     let cursor = index + 1
-    while (cursor < messages.length && messages[cursor]!.role === 'toolResult') {
-      const result = messages[cursor]!
-      if (result.role !== 'toolResult') break
-      unitMessages.push(result)
-      resultIds.add(result.toolCallId)
+    while (cursor < messages.length) {
+      const result = adapter.getToolResult(messages[cursor]!)
+      if (!result) break
+      unitMessages.push(messages[cursor]!)
+      resultIds.add(result.callId)
       cursor++
     }
-    const expectedIds = new Set(toolCallIds)
+    const expectedIds = new Set(toolCalls.map((call) => call.id))
     units.push({
       messages: unitMessages,
-      tokens: estimateMessagesTokens(unitMessages),
+      tokens: adapter.estimateTokens(unitMessages),
       safeToRetain:
         unitMessages.length - 1 === expectedIds.size &&
         resultIds.size === expectedIds.size &&
@@ -131,24 +99,26 @@ export function buildConversationUnits(
   return units
 }
 
-function normalizeSummaryMessages(units: readonly ConversationUnit[]): AgentMessage[] {
+function normalizeSummaryMessages<Message>(
+  units: readonly ConversationUnit<Message>[],
+  adapter: CompactionMessageAdapter<Message>,
+): Message[] {
   return units.flatMap((unit) => {
     if (unit.safeToRetain) return unit.messages
-    return [{
-      role: 'user' as const,
-      content:
-        '[Malformed tool interaction preserved as text for summarization]\n' +
-        stringifyMalformedUnit(unit.messages),
-      timestamp: unit.messages[0]?.timestamp ?? Date.now(),
-    }]
+    const timestamp = adapter.getTimestamp(unit.messages[0]!) ?? Date.now()
+    return [adapter.createUserMessage(
+      '[Malformed tool interaction preserved as text for summarization]\n' +
+        adapter.formatMalformedUnit(unit.messages),
+      timestamp,
+    )]
   })
 }
 
-function selectCompactionRanges(
-  units: readonly ConversationUnit[],
+function selectCompactionRanges<Message>(
+  units: readonly ConversationUnit<Message>[],
   contextWindow: number,
   tokensBefore: number,
-): { summaryUnits: ConversationUnit[]; recentUnits: ConversationUnit[] } {
+): { summaryUnits: ConversationUnit<Message>[]; recentUnits: ConversationUnit<Message>[] } {
   const recentBudget = Math.max(
     1,
     Math.min(
@@ -173,32 +143,30 @@ function selectCompactionRanges(
 }
 
 /** Rebuild the active context for sessions compacted before checkpoints existed. */
-export function restoreLegacyCompactionContext(
-  messages: readonly AgentMessage[],
+export function restoreLegacyCompactionContext<Message>(
+  messages: readonly Message[],
   contextWindow: number,
   tokensBefore: number,
   summary: string,
   timestamp: number,
-): AgentMessage[] {
+  adapter: CompactionMessageAdapter<Message>,
+): Message[] {
   const { recentUnits } = selectCompactionRanges(
-    buildConversationUnits(messages),
+    buildConversationUnits(messages, adapter),
     contextWindow,
     tokensBefore,
   )
   return [
-    {
-      role: 'user',
-      content: getCompactUserSummaryMessage(summary),
-      timestamp,
-    },
+    adapter.createSummaryMessage(summary, timestamp),
     ...recentUnits.flatMap((unit) => unit.messages),
   ]
 }
 
-export function validateToolMessagePairs(
-  messages: readonly AgentMessage[],
+export function validateToolMessagePairs<Message>(
+  messages: readonly Message[],
+  adapter: CompactionMessageAdapter<Message>,
 ): { valid: true } | { valid: false; error: string } {
-  const units = buildConversationUnits(messages)
+  const units = buildConversationUnits(messages, adapter)
   const invalidIndex = units.findIndex((unit) => !unit.safeToRetain)
   return invalidIndex < 0
     ? { valid: true }
@@ -214,31 +182,31 @@ export function validateToolMessagePairs(
  * 2. Auto-compact: LLM-powered summary when context window fills
  * 3. Manual /compact: User-triggered compaction
  */
-export class CompactionManager {
-  private model: Model<any>
-  private models: Models
-  private apiKey: string
+export class CompactionManager<Message> {
+  private contextWindow: number
   private settings: CompactionSettings
   private onProgress?: (progress: CompactionProgress) => void
   private compacting = false
   private systemPromptTokens = 0
-  private generateSummaryFn: typeof generateSummary
+  private summarize: CompactionSummaryGenerator<Message>
+  private readonly messageAdapter: CompactionMessageAdapter<Message>
+  private readonly compactableToolNames: ReadonlySet<string>
   private progressStartedAt = 0
 
   constructor(options: {
-    model: Model<any>
-    models: Models
-    apiKey: string
+    contextWindow: number
+    messageAdapter: CompactionMessageAdapter<Message>
+    compactableToolNames: ReadonlySet<string>
+    summarize: CompactionSummaryGenerator<Message>
     settings?: Partial<CompactionSettings>
     onProgress?: (progress: CompactionProgress) => void
-    generateSummaryFn?: typeof generateSummary
   }) {
-    this.model = options.model
-    this.models = options.models
-    this.apiKey = options.apiKey
+    this.contextWindow = options.contextWindow
     this.settings = { ...DEFAULT_COMPACTION_SETTINGS, ...options.settings }
     this.onProgress = options.onProgress
-    this.generateSummaryFn = options.generateSummaryFn ?? generateSummary
+    this.messageAdapter = options.messageAdapter
+    this.compactableToolNames = options.compactableToolNames
+    this.summarize = options.summarize
   }
 
   reportProgress(progress: CompactionProgress): void {
@@ -258,29 +226,20 @@ export class CompactionManager {
     })
   }
 
-  /**
-   * Update system prompt token estimate (called when prompt changes).
-   */
+  /** Update system prompt token estimate (called when prompt changes). */
   setSystemPrompt(prompt: string): void {
     this.systemPromptTokens = Math.ceil(prompt.length / 4)
   }
 
-  /**
-   * Check if compaction is needed based on current token usage.
-   * Previously compacted contexts may grow again and are eligible for another
-   * compaction once they cross the threshold.
-   */
-  isCompactionNeeded(messages: AgentMessage[]): boolean {
-    const messageTokens = estimateMessagesTokens(messages)
+  /** Previously compacted contexts can grow again and are eligible for another compaction. */
+  isCompactionNeeded(messages: readonly Message[]): boolean {
+    const messageTokens = this.messageAdapter.estimateTokens(messages)
     const tokens = messageTokens + this.systemPromptTokens
-    return shouldCompact(tokens, this.model.contextWindow, this.settings)
+    return this.settings.enabled && tokens > this.contextWindow - this.settings.reserveTokens
   }
 
-  /**
-   * Get context usage stats for display.
-   * Uses local character-based estimation for reliability (not dependent on API usage data).
-   */
-  getContextUsage(messages: AgentMessage[]): {
+  /** Uses local character-based estimation for reliability (not dependent on API usage data). */
+  getContextUsage(messages: readonly Message[]): {
     tokens: number
     messageTokens: number
     systemPromptTokens: number
@@ -288,9 +247,9 @@ export class CompactionManager {
     percentUsed: number
     percentRemaining: number
   } {
-    const messageTokens = estimateMessagesTokens(messages)
+    const messageTokens = this.messageAdapter.estimateTokens(messages)
     const tokens = messageTokens + this.systemPromptTokens
-    const contextWindow = this.model.contextWindow
+    const contextWindow = this.contextWindow
     const percentUsed = Math.round((tokens / contextWindow) * 100)
     return {
       tokens,
@@ -302,68 +261,46 @@ export class CompactionManager {
     }
   }
 
-  /**
-   * Layer 1: Microcompact — clear old tool results in-place.
-   * No LLM call, cheap and fast.
-   */
-  microcompact(messages: AgentMessage[]): {
-    messages: AgentMessage[]
-    cleared: number
-  } {
-    // Collect tool result message indices grouped by tool name
+  /** Layer 1: Clear old tool results in-place without an LLM call. */
+  microcompact(messages: Message[]): { messages: Message[]; cleared: number } {
     const toolResultIndices = new Map<string, number[]>()
     for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i]
-      if (msg.role === 'toolResult') {
-        const toolName = msg.toolName ?? 'unknown'
-        if (COMPACTABLE_TOOL_NAMES.has(toolName)) {
-          const indices = toolResultIndices.get(toolName) ?? []
-          indices.push(i)
-          toolResultIndices.set(toolName, indices)
-        }
-      }
+      const result = this.messageAdapter.getToolResult(messages[i]!)
+      if (!result) continue
+      const toolName = result.toolName ?? 'unknown'
+      if (!this.compactableToolNames.has(toolName)) continue
+      const indices = toolResultIndices.get(toolName) ?? []
+      indices.push(i)
+      toolResultIndices.set(toolName, indices)
     }
 
-    // Determine which indices to clear (keep last N per tool type)
     const clearIndices = new Set<number>()
-    for (const [, indices] of toolResultIndices) {
+    for (const indices of toolResultIndices.values()) {
       const toClear = indices.slice(0, Math.max(0, indices.length - KEEP_RECENT_TOOLS))
-      for (const idx of toClear) {
-        clearIndices.add(idx)
-      }
+      for (const index of toClear) clearIndices.add(index)
     }
 
-    if (clearIndices.size === 0) {
-      return { messages, cleared: 0 }
-    }
-
-    // Create new messages array with cleared tool results
-    const newMessages = messages.map((msg, i) => {
-      if (!clearIndices.has(i)) return msg
-      if (msg.role !== 'toolResult') return msg
-
-      // Replace content with cleared marker
-      return {
-        ...msg,
-        content: [{ type: 'text' as const, text: CLEARED_MESSAGE }],
-      }
-    })
-
+    if (clearIndices.size === 0) return { messages, cleared: 0 }
+    const newMessages = messages.map((message, index) =>
+      clearIndices.has(index)
+        ? this.messageAdapter.replaceToolResultContent(message, CLEARED_MESSAGE)
+        : message,
+    )
     return { messages: newMessages, cleared: clearIndices.size }
   }
 
   /** Shared implementation for automatic and manual compaction. */
   async compact(
-    messages: AgentMessage[],
+    messages: Message[],
     customInstructions: string | undefined,
     automatic: boolean,
-  ): Promise<ContextCompactionResult> {
+  ): Promise<ContextCompactionResult<Message>> {
     if (this.compacting) {
       throw new Error('Compaction already in progress')
     }
     this.compacting = true
     this.progressStartedAt = Date.now()
-    const tokensBefore = estimateMessagesTokens(messages)
+    const tokensBefore = this.messageAdapter.estimateTokens(messages)
 
     try {
       this.emitProgress({
@@ -373,14 +310,15 @@ export class CompactionManager {
         progress: 5,
       })
 
-      const units = buildConversationUnits(messages)
+      const units = buildConversationUnits(messages, this.messageAdapter)
       const { summaryUnits, recentUnits } = selectCompactionRanges(
         units,
-        this.model.contextWindow,
+        this.contextWindow,
         tokensBefore,
       )
       const messagesToSummarize = normalizeSummaryMessages(
         summaryUnits.length > 0 ? summaryUnits : units,
+        this.messageAdapter,
       )
       const recentMessages = recentUnits.flatMap((unit) => unit.messages)
 
@@ -421,17 +359,12 @@ export class CompactionManager {
 
       let result
       try {
-        result = await this.generateSummaryFn(
+        result = await this.summarize(
           messagesToSummarize,
-          this.models,
-          this.model,
-          this.settings.reserveTokens,
-          customInstructions,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          BACKGROUND_CONTEXT,
+          {
+            reserveTokens: this.settings.reserveTokens,
+            ...(customInstructions === undefined ? {} : { instructions: customInstructions }),
+          },
         )
       } finally {
         clearInterval(progressTimer)
@@ -446,14 +379,10 @@ export class CompactionManager {
         throw new Error('Summarization returned empty summary')
       }
 
-      // Build the summary message
-      const summaryUserMessage: AgentMessage = {
-        role: 'user',
-        content: getCompactUserSummaryMessage(summary),
-        timestamp: Date.now(),
-      }
-
-      const newMessages = [summaryUserMessage, ...recentMessages]
+      const newMessages = [
+        this.messageAdapter.createSummaryMessage(summary, Date.now()),
+        ...recentMessages,
+      ]
       this.emitProgress({
         phase: 'validating',
         message: 'Validating compacted tool-call boundaries...',
@@ -462,11 +391,11 @@ export class CompactionManager {
         processedUnits: units.length,
         totalUnits: units.length,
       })
-      const validation = validateToolMessagePairs(newMessages)
+      const validation = validateToolMessagePairs(newMessages, this.messageAdapter)
       if (!validation.valid) {
         throw new Error(`Compaction produced invalid context: ${validation.error}`)
       }
-      const tokensAfter = estimateMessagesTokens(newMessages)
+      const tokensAfter = this.messageAdapter.estimateTokens(newMessages)
 
       this.emitProgress({
         phase: 'validating',
@@ -498,24 +427,11 @@ export class CompactionManager {
     }
   }
 
-  /**
-   * Check if currently compacting.
-   */
   isCompacting(): boolean {
     return this.compacting
   }
 
-  /**
-   * Update model (e.g., after /model switch).
-   */
-  setModel(model: Model<any>): void {
-    this.model = model
-  }
-
-  /**
-   * Update API key.
-   */
-  setApiKey(apiKey: string): void {
-    this.apiKey = apiKey
+  setContextWindow(contextWindow: number): void {
+    this.contextWindow = contextWindow
   }
 }

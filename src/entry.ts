@@ -34,5 +34,10 @@ if (process.env.MICROCODE_GATEWAY_CHILD !== '1') {
   }
 }
 
-const { main } = await import('./main.tsx')
-await main()
+if (process.env.MICROCODE_RUNTIME_CHILD === '1') {
+  const { runRuntimeDaemon } = await import('./daemon/runtime-service/run.ts')
+  await runRuntimeDaemon()
+} else {
+  const { main } = await import('./main.tsx')
+  await main()
+}
