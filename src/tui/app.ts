@@ -235,6 +235,8 @@ export class App {
   private agentActivityLabel = 'Working…'
   private gatewayBindControl?: GatewayBindControl
   private unsubscribeRuntimeConnection?: () => void
+  private runtimeConnectionWasConnected = true
+  private runtimeConnectionStatusText?: Text
   private workingStartedAt = 0
   private workingFrameIndex = 0
   private workingTimer: ReturnType<typeof setInterval> | undefined
@@ -257,15 +259,8 @@ export class App {
     this.gitPort = gitPort
     this.sessionManager = sessionManager
     this.gatewayBindControl = gatewayBindControl
-    let runtimeWasConnected = true
     this.unsubscribeRuntimeConnection = agent.subscribeRuntimeConnection?.((connected, error) => {
-      if (!connected) {
-        runtimeWasConnected = false
-        this.showStatus(`Runtime connection interrupted${error ? `: ${error.message}` : ''}. Reconnecting…`)
-      } else if (!runtimeWasConnected) {
-        runtimeWasConnected = true
-        this.showStatus('Runtime connection restored.')
-      }
+      this.handleRuntimeConnectionChange(connected, error)
     })
     this.ui = new TUI(new ProcessTerminal())
     // Clear stale rows when a long injected prompt disappears; otherwise Windows consoles can retain it below the footer.
@@ -3768,6 +3763,30 @@ export class App {
     this.chatContainer.addChild(new Spacer(1))
     this.chatContainer.addChild(new Text(theme.dim(message), 1, 0))
     this.chatContainer.addChild(new Spacer(1))
+    this.ui.requestRender()
+  }
+
+  private handleRuntimeConnectionChange(connected: boolean, error?: Error): void {
+    if (this.runtimeConnectionWasConnected === connected) return
+    this.runtimeConnectionWasConnected = connected
+
+    const message = connected
+      ? 'Runtime connection restored.'
+      : `Runtime connection interrupted${error ? `: ${error.message}` : ''}. Reconnecting…`
+    const rendered = theme.dim(message)
+    const statusIsInTranscript = this.runtimeConnectionStatusText
+      && this.chatContainer.children.includes(this.runtimeConnectionStatusText)
+
+    if (statusIsInTranscript) {
+      this.runtimeConnectionStatusText!.setText(rendered)
+    } else {
+      this.runtimeConnectionStatusText = new Text(rendered, 1, 0)
+      this.chatContainer.addChild(new Spacer(1))
+      this.chatContainer.addChild(this.runtimeConnectionStatusText)
+      this.chatContainer.addChild(new Spacer(1))
+    }
+
+    this.invalidateChatRender()
     this.ui.requestRender()
   }
 

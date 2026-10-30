@@ -112,6 +112,7 @@
 - **AC-07.6** no-daemon 保留明确的进程内 Pi 路径；默认连接失败可见并按文档定义的策略处理，不会静默降低安全边界。
 - **AC-07.7** 用户通过 `/exit`、退出型 Ctrl+C 或 SIGTERM 有序结束 TUI 时，CLI 先取消活动 turn、关闭 runtime client，再请求停止 Agent Runtime 和 TUI 启动的临时 Gateway；关机等待两个服务的监听端口关闭且记录的进程 PID 退出后才退出。显式启动为持久模式的 Gateway 不随 TUI 关闭。
 - **AC-07.8** 连续工具调用使用紧凑的活动时间线，清除组件造成的多余行距但保留展开内容中的行结构；工具输出预览移除终端控制序列并按终端列宽截断摘要，保证 ANSI、回车覆盖、退格及宽字符不会破坏 TUI 布局。
+- **AC-07.9** Runtime 重连提示在转录中复用单条状态行；同一断开状态下的重试失败不重复通知，事件流重新建立后更新为恢复状态。
 
 **验证方式**：客户端/服务器 transport contract tests、进程启动/重连/退出集成检查。
 
@@ -160,7 +161,7 @@
 | 用户模型协议清单 | REQ-04 | src/daemon/protocol、src/daemon/server | T-04 | AC-04.1 至 AC-04.5 | 四协议工具往返、SSE 顺序、unsupported request、流错误、断连取消均有固定 fixture；OpenAI Node SDK 6.40.0 对本地 fake runtime Gateway 成功请求。Codex CLI hosted `custom` 仍按设计拒绝，不代表支持 hosted-tool 执行 |
 | 用户工具接入及运行时修改 | REQ-05 | src/tools、src/agent/AgentToolManager | T-05 | AC-05.1 至 AC-05.6 | 静态 registry、runtime mutation、受保护工具控制、服务端版本冲突、客户端刷新重试、capability event 与 TUI snapshot 更新均有测试 |
 | 用户明确保留能力系统 | REQ-06 | src/skill、src/mcp、src/plugins | T-06 | AC-06.1 至 AC-06.3 | runtime child 持有发现、连接及 enable/refresh；测试覆盖 Plugin Skill scope/load、MCP legacy source、deny 保持、secret-safe DTO 与 capability event |
-| 用户 UI/服务端前后端分离 | REQ-07 | src/daemon、src/tui、src/main.tsx | T-07 / T-08 / T-11 / T-12 | AC-07.1 至 AC-07.8 | 默认入口使用 runtime launcher、HTTP/SSE client 和 facades；进程 auth prompt/关闭重启/多客户端竞争、断线恢复、有序退出 PID 清理、TUI event/view contract、输入遮罩、紧凑工具时间线及安全输出预览均有验收；显式 `--no-daemon` 路径保留 |
+| 用户 UI/服务端前后端分离 | REQ-07 | src/daemon、src/tui、src/main.tsx | T-07 / T-08 / T-11 / T-12 / T-13 | AC-07.1 至 AC-07.9 | 默认入口使用 runtime launcher、HTTP/SSE client 和 facades；进程 auth prompt/关闭重启/多客户端 stale 重试、断线恢复、有序退出 PID 清理、TUI event/view contract、输入遮罩、紧凑工具时间线、安全输出预览及单行连接提示均有验收；显式 `--no-daemon` 路径保留 |
 | 用户要求持续演进和兼容 | REQ-08 | tests、docs/specs/runtime-architecture | T-01 / T-09 / T-10 | AC-08.1 至 AC-08.4 | 历史 v3 JSONL fixture 可读且源文件不改写；runtime service 与 `--no-daemon` 可恢复同一 transcript；model/tool contribution guides 与 provider/protocol capability matrices 已建立并关联固定 fixtures；最终全量验收状态见 tasks.md |
 
 ## 假设与未决问题
@@ -178,4 +179,5 @@
 | 2026-10-28 | 根据运行时代码与新增验收更新 REQ 到任务状态映射；记录 provider/protocol fixture 与成功外部客户端 smoke 的剩余范围 |
 | 2026-10-30 | 增加 AC-07.7，规定交互式退出时等待 Runtime 与临时 Gateway 子进程退出；显式 Gateway start 仍可持久运行 |
 | 2026-10-30 | 增加 AC-07.8，规定工具时间线紧凑布局及展开输出的控制码/终端列宽处理 |
+| 2026-10-30 | 增加 AC-07.9，规定重连状态通知按状态切换发送并复用单条 TUI 提示行 |
 | 2026-10-27 | 初稿：定义层边界、初始 provider/auth 白名单、四种网关协议、工具变更和客户端/服务端分离 |

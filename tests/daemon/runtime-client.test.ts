@@ -138,8 +138,10 @@ describe('RuntimeClientSession recovery contracts', () => {
     } as unknown as RuntimeServiceClient
     const session = new RuntimeClientSession(client, 'session-c')
     let sawDisconnect = false
+    const connectionChanges: boolean[] = []
     session.subscribe({
       onConnectionChange: (connected) => {
+        connectionChanges.push(connected)
         if (!connected) {
           sawDisconnect = true
           resolveDisconnected()
@@ -161,6 +163,7 @@ describe('RuntimeClientSession recovery contracts', () => {
 
       expect(streamCalls).toBeGreaterThanOrEqual(3)
       expect(snapshotCalls).toBeGreaterThanOrEqual(3)
+      expect(connectionChanges.filter((connected) => !connected)).toHaveLength(1)
       expect(session.isConnected).toBe(true)
     } finally {
       if (recoveryTimer) clearTimeout(recoveryTimer)

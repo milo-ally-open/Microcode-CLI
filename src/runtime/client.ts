@@ -123,7 +123,12 @@ export class RuntimeClientSession {
       const streamSignal = AbortSignal.any([this.controller.signal, streamController.signal])
       const streamSessionId = this.sessionIdValue
       try {
-        for await (const event of this.client.events(streamSessionId, this.sequence, streamSignal)) {
+        for await (const event of this.client.events(streamSessionId, this.sequence, streamSignal, () => {
+          if (streamSessionId !== this.sessionIdValue || streamSignal.aborted) return
+          connected = true
+          delayMs = 100
+          this.notifyConnection(true)
+        })) {
           if (streamSessionId !== this.sessionIdValue) break
           if (event.sequence <= this.sequence) continue
           this.sequence = event.sequence
@@ -145,6 +150,7 @@ export class RuntimeClientSession {
             try { callback.onEvent?.(event) } catch { /* A view callback cannot stop event delivery. */ }
           }
           connected = true
+          this.notifyConnection(true)
           delayMs = 100
           if (event.type === 'agent_end' || event.type === 'turn_end') {
             void this.refreshSnapshot(this.controller.signal).catch(() => undefined)
@@ -161,6 +167,7 @@ export class RuntimeClientSession {
             await this.refreshSnapshot(this.controller.signal, true)
             connected = true
             delayMs = 100
+            this.notifyConnection(true)
           } catch (snapshotError) {
             this.notifyConnection(false, toError(snapshotError))
             await sleep(delayMs, this.controller.signal)
@@ -188,6 +195,7 @@ export class RuntimeClientSession {
   }
 
   private notifyConnection(connected: boolean, error?: Error): void {
+    if (this.connected === connected) return
     this.connected = connected
     for (const callback of [...this.callbacks]) {
       try { callback.onConnectionChange?.(connected, error) } catch { /* A view callback cannot stop reconnects. */ }

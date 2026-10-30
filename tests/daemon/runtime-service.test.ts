@@ -123,8 +123,10 @@ describe('Bun runtime service transport', () => {
 
       await expect(client.events('session-1', 0).next()).rejects.toBeInstanceOf(RuntimeSnapshotRequiredError)
 
-      const iterator = client.events('session-1', 1)
+      let streamOpened = false
+      const iterator = client.events('session-1', 1, undefined, () => { streamOpened = true })
       const first = await iterator.next()
+      expect(streamOpened).toBe(true)
       const second = await iterator.next()
       expect(first.value?.sequence).toBe(2)
       expect(second.value?.sequence).toBe(3)

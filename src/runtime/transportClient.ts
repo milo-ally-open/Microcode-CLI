@@ -101,6 +101,7 @@ export class RuntimeServiceClient {
     sessionId: string,
     lastSequence = 0,
     signal?: AbortSignal,
+    onOpen?: () => void,
   ): AsyncGenerator<RuntimeEventEnvelope> {
     const query = new URLSearchParams({ session_id: sessionId })
     const response = await this.fetchImpl(`${this.baseUrl}/runtime/v1/events?${query}`, {
@@ -116,6 +117,7 @@ export class RuntimeServiceClient {
     }
     if (!response.ok) throw await this.clientError(response)
     if (!response.body) throw new RuntimeServiceClientError('Runtime event stream has no body.', 502, 'missing_event_stream')
+    onOpen?.()
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()

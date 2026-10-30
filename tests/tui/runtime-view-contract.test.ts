@@ -144,6 +144,26 @@ describe('runtime TUI view contract', () => {
     expect(renders).toBe(1)
   })
 
+  test('updates one transcript row for repeated runtime connection changes', () => {
+    const transcript = new ChatTranscript()
+    const app = Object.create(App.prototype) as any
+    Object.assign(app, {
+      runtimeConnectionWasConnected: true,
+      runtimeConnectionStatusText: undefined,
+      chatContainer: transcript,
+      ui: { requestRender() {} },
+    })
+
+    app.handleRuntimeConnectionChange(false, new Error('ECONNRESET'))
+    app.handleRuntimeConnectionChange(false, new Error('ECONNRESET'))
+    app.handleRuntimeConnectionChange(true)
+    app.handleRuntimeConnectionChange(false, new Error('connection reset again'))
+
+    const rendered = transcript.render(120).join('\n')
+    expect(rendered.match(/Runtime connection/g)).toHaveLength(1)
+    expect(rendered).toContain('connection reset again')
+  })
+
   test('keeps runtime model auth prompts interactive and returns secret input only through the command', async () => {
     let callbacks: { onEvent?(event: RuntimeEventEnvelope): void } | undefined
     const commands: Array<{ type: string; payload: Record<string, unknown> }> = []

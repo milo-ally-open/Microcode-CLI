@@ -1,7 +1,7 @@
 # 实施任务：Microcode 运行时架构重构
 
 > 关联规格：[spec.md](spec.md)；设计：[design.md](design.md)<br>
-> 当前状态：T-01 至 T-12 已完成。Provider/API 和四协议验收证据、固定版本客户端 smoke、最终回归及已知兼容边界见本页完成摘要与配套能力矩阵。
+> 当前状态：T-01 至 T-13 已完成。Provider/API 和四协议验收证据、固定版本客户端 smoke、最终回归及已知兼容边界见本页完成摘要与配套能力矩阵。
 
 ## 任务清单
 
@@ -28,6 +28,7 @@
 - [x] **T-10 同步权威文档并完成实施验收** — 覆盖 REQ-03、REQ-04、REQ-08；AC：AC-03.1、AC-03.2、AC-03.3、AC-03.4、AC-04.1、AC-04.2、AC-04.3、AC-04.4、AC-04.5、AC-08.4。README、模型/工具指南、规格与能力矩阵已同步；全量 tests、TypeScript 检查、runtime-architecture validator、build 与 `git diff --check` 均通过。Codex CLI integration test 按默认配置跳过，OpenAI Node SDK 6.40.0 的本地成功 smoke 已运行。
 - [x] **T-11 有序退出时关闭 Runtime 与临时 Gateway 子进程** — 覆盖 REQ-07；AC：AC-07.7。`/exit`、退出型 Ctrl+C 与 SIGTERM 在退出前取消活动 turn、停止 Runtime、停止 TUI 启动的临时 Gateway，并等待监听关闭及子进程退出；显式 `gateway start` 仍为持久模式。真实子进程验收覆盖 runtime/gateway stop helper。
 - [x] **T-12 精简工具调用时间线并清理展开预览** — 覆盖 REQ-07；AC：AC-07.8。工具时间线去除多余上下空行并同步调整展开按钮命中行；Bash、通用工具、文件读取/编辑/写入及共享预览路径过滤终端控制序列，按终端列宽截断摘要；定向 TUI/tool tests、TypeScript 检查及 diff 检查结果记录于 2026-10-30 记录。
+- [x] **T-13 收敛 Runtime 重连通知** — 覆盖 REQ-07；AC：AC-07.9。Runtime session 仅在连接状态改变时通知，并在 SSE response 建立时报告恢复；TUI 更新唯一的连接状态行，不重复追加历史消息。定向 runtime/TUI tests、TypeScript 检查及 diff 检查见本轮记录。
 
 
 ## 本轮 Todo 闭环（2026-10-28）
@@ -164,3 +165,10 @@
 - 连续工具调用行移除了 `Text` 组件产生的多余上下空白，并压缩相邻内容之间重复的空行；展开预览按钮仍定位到实际渲染行。
 - 成功 Bash 调用不再重复显示 `exit: 0`，失败码仍可见。Bash 和共享工具预览清理 ANSI/终端控制字符，统一处理 `\r` 进度覆盖、退格及 CRLF；文件读/编辑/写入预览沿用同一清理逻辑。摘要截断改按终端列宽计算，避免中文宽字符错位。
 - `bun test ./tests/tui ./tests/tools/bash-ui.test.ts ./tests/tools/runtime-tools.test.ts ./tests/tools/ui-index.test.ts`：76 pass、0 fail、474 expectations；`bunx tsc --noEmit` 通过；`git diff --check` 通过。Build 未运行，本次只改动源码与规格文档。
+
+## 2026-10-30 Runtime 重连提示收敛
+
+- 当前状态：T-01 至 T-13 已完成。
+- 定位：`RuntimeClientSession` 在每次失败重试中的快照刷新失败都调用 `notifyConnection(false)`；该方法原先无状态去重。TUI 再用 `showStatus()` 为每次断开/恢复向转录追加新行。
+- 修复：连接 session 在状态不变时不再重复通知；SSE response 建立后即报告恢复。TUI 用单条可更新状态行替代重复追加。
+- `bun test ./tests/daemon/runtime-client.test.ts ./tests/daemon/runtime-service.test.ts ./tests/tui/runtime-view-contract.test.ts`：17 pass、0 fail、71 expectations；`bunx tsc --noEmit` 通过；`git diff --check` 通过。Build 未运行。
