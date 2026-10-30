@@ -1,9 +1,9 @@
 import { TOOL_IDS, type ToolAdapter, type ToolExecutionResult } from '../contracts.ts'
 import { spawn } from 'child_process'
 import { existsSync } from 'fs'
-import { stripVTControlCharacters } from 'util'
 import { Type, type Static } from 'typebox'
 import type { PermissionBehavior } from '../../permissions/types.ts'
+import { normalizeTerminalText } from '../../utils/terminalText.ts'
 
 export const TOOL_NAME = TOOL_IDS.bash
 export const TOOL_DEFAULT_PERMISSION: PermissionBehavior = 'ask'
@@ -78,24 +78,6 @@ function createOutputCapture(
   return { head: '', tail: '', totalChars: 0, truncated: false, maxChars, headChars }
 }
 
-function normalizeTerminalOutput(value: string): string {
-  const withoutAnsi = stripVTControlCharacters(value)
-    .replace(/\r\n/g, '\n')
-    .replace(/\0/g, '')
-
-  return withoutAnsi
-    .split('\n')
-    .map((line) => {
-      // A bare carriage return means "overwrite this terminal line".
-      let current = line.split('\r').at(-1) ?? ''
-      while (current.includes('\b')) {
-        current = current.replace(/[^\b]\b/g, '')
-      }
-      return current.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trimEnd()
-    })
-    .join('\n')
-}
-
 function getShellConfig(): { shell: string; args: string[]; name: string } {
   if (process.platform === 'win32') {
     if (process.env.PSModulePath || process.env.SHELL?.includes('powershell')) {
@@ -133,10 +115,10 @@ export function createBashTool(cwd: string): ToolAdapter<typeof bashSchema, Bash
 
       const emitUpdate = () => {
         updateTimer = undefined
-        const cleanStdout = normalizeTerminalOutput(readOutput(stdoutCapture))
-        const cleanStderr = normalizeTerminalOutput(readOutput(stderrCapture))
-        const cleanOutput = normalizeTerminalOutput(readOutput(outputCapture))
-        const displayOutput = normalizeTerminalOutput(readOutput(displayCapture))
+        const cleanStdout = normalizeTerminalText(readOutput(stdoutCapture))
+        const cleanStderr = normalizeTerminalText(readOutput(stderrCapture))
+        const cleanOutput = normalizeTerminalText(readOutput(outputCapture))
+        const displayOutput = normalizeTerminalText(readOutput(displayCapture))
         onUpdate?.({
           content: [{ type: 'text', text: cleanOutput }],
           details: {
@@ -225,10 +207,10 @@ export function createBashTool(cwd: string): ToolAdapter<typeof bashSchema, Bash
         })
       })
 
-      const stdout = normalizeTerminalOutput(readOutput(stdoutCapture))
-      const stderr = normalizeTerminalOutput(readOutput(stderrCapture))
-      const output = normalizeTerminalOutput(readOutput(outputCapture))
-      const displayOutput = normalizeTerminalOutput(readOutput(displayCapture))
+      const stdout = normalizeTerminalText(readOutput(stdoutCapture))
+      const stderr = normalizeTerminalText(readOutput(stderrCapture))
+      const output = normalizeTerminalText(readOutput(outputCapture))
+      const displayOutput = normalizeTerminalText(readOutput(displayCapture))
 
       return {
         content: [{ type: 'text', text: output || '(no output)' }],

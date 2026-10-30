@@ -7,6 +7,8 @@ import {
 } from '../../utils/diffUtils.ts'
 import { formatCompletedStatus, formatRunningStatus, formatToolLabel, getProgressFrame } from '../toolPresentation.ts'
 import { ToolPreviewController } from '../toolPreviewController.ts'
+import { normalizeTerminalText } from '../../utils/terminalText.ts'
+import { oneLine } from '../toolPreview.ts'
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>
@@ -143,9 +145,9 @@ export class FileEditToolUI extends Container {
 
     const allDiffLines = this.details.diff ?? []
     const visibleDiffLines = allDiffLines.slice(0, this.preview.visibleRows(allDiffLines.length))
-    const diff = numberDiffLines(visibleDiffLines).map(({ line, gutter }) => `${theme.dim(gutter)}${renderTerminalDiffLine(line)}`)
+    const diff = numberDiffLines(visibleDiffLines).map(({ line, gutter }) => `${theme.dim(gutter)}${renderTerminalDiffLine(normalizeTerminalText(line))}`)
     if (this.details.previewNotice) {
-      diff.push(theme.dim(this.details.previewNotice))
+      diff.push(theme.dim(normalizeTerminalText(this.details.previewNotice).replace(/\n/g, ' ')))
     } else if (this.details.diffTruncated) {
       diff.push(theme.dim('Diff unavailable for files over 1 MB'))
     } else if (allDiffLines.length === 0) {
@@ -162,9 +164,9 @@ export class FileEditToolUI extends Container {
 
   private getOutputPreview(): string {
     if (!this.result?.content) return ''
-    return this.result.content
+    return oneLine(this.result.content
       .filter((c) => c.type === 'text')
-      .map((c) => (c.text ?? '').slice(0, 200).replace(/\n/g, ' '))
-      .join(' ')
+      .map((c) => c.text ?? '')
+      .join(' '), 200)
   }
 }

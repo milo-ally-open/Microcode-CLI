@@ -279,6 +279,38 @@ describe('tui modules', () => {
     expect(timeline.render(80).filter((line) => line.includes('tool completed'))).toHaveLength(1)
   })
 
+  test('turn timeline removes padded blank rows around consecutive tool calls', () => {
+    const timeline = new TurnTimeline()
+    timeline.addEntry(new Text('user input', 0, 0), 'user')
+    timeline.addEntry({ render: () => [' '.repeat(80), '  ✓ bash command', '  exit: 0', ' '.repeat(80)] }, 'tool')
+    timeline.addEntry({ render: () => [' '.repeat(80), '  ✓ Grep result', ' '.repeat(80)] }, 'tool')
+
+    const rendered = timeline.render(80)
+    expect(rendered).toHaveLength(4)
+    expect(rendered[1]).toContain('bash command')
+    expect(rendered[2]).toContain('exit: 0')
+    expect(rendered[3]).toContain('Grep result')
+  })
+
+  test('tool preview click targets keep their row after padded rows are compacted', () => {
+    const row = {
+      render: () => [' '.repeat(80), 'tool [Expand preview]', ' '.repeat(80)],
+      getInteractionTargets: () => [{
+        action: 'toggle-preview' as const,
+        rowOffset: 1,
+        startColumn: 6,
+        endColumn: 21,
+        activate: () => {},
+      }],
+    } as unknown as Component
+    const timeline = new TurnTimeline()
+    timeline.addEntry(new Text('user input', 0, 0), 'user')
+    timeline.addEntry(row, 'tool')
+
+    timeline.render(80)
+    expect(timeline.getToolInteractionTargets(80)[0]?.rowOffset).toBe(1)
+  })
+
   test('context compaction is recorded as a concise status in the active turn', () => {
     const timeline = new TurnTimeline()
     timeline.addEntry(new Text('user input'), 'user')

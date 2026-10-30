@@ -2,6 +2,7 @@ import { Box, Container, Text } from '@earendil-works/pi-tui'
 import { theme } from '../theme.ts'
 import { formatCompletedStatus, formatRunningStatus, formatToolLabel, getProgressFrame } from '../toolPresentation.ts'
 import { ToolPreviewController } from '../toolPreviewController.ts'
+import { normalizeTerminalText } from '../../utils/terminalText.ts'
 
 
 interface ToolResult {
@@ -144,18 +145,18 @@ export class FileReadToolUI extends Container {
       const maxLineNum = startLine + rawLines.length - 1
       const padding = String(Math.max(startLine, maxLineNum)).length
       const numbered = rawLines.map((line, index) =>
-        `${String(startLine + index).padStart(padding, ' ')}\t${line}`,
+        `${String(startLine + index).padStart(padding, ' ')}\t${normalizeTerminalText(line).replace(/\n/g, ' ')}`,
       )
       return [
-        ...(this.details.warning ? [this.details.warning] : []),
+        ...(this.details.warning ? [normalizeTerminalText(this.details.warning).replace(/\n/g, ' ')] : []),
         ...numbered,
-        ...(this.details.continuation ? [this.details.continuation] : []),
+        ...(this.details.continuation ? [normalizeTerminalText(this.details.continuation).replace(/\n/g, ' ')] : []),
       ]
     }
-    const output = this.result.content
+    const output = normalizeTerminalText(this.result.content
       .filter((item) => item.type === 'text')
       .map((item) => item.text ?? '')
-      .join('\n')
+      .join('\n'))
     const lines = output.split('\n')
     if (output.endsWith('\n')) lines.pop()
     return output ? lines : []

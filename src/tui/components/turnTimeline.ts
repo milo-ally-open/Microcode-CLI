@@ -18,6 +18,35 @@ function setRenderInvalidationListener(component: Component, listener?: () => vo
   (component as TranscriptCacheAwareComponent).setRenderInvalidationListener?.(listener)
 }
 
+function compactToolRows(lines: readonly string[]): { lines: string[]; rowMap: number[] } {
+  const isBlank = (line: string) => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim().length === 0
+  const firstContent = lines.findIndex((line) => !isBlank(line))
+  if (firstContent < 0) return { lines: [], rowMap: lines.map(() => 0) }
+
+  let lastContent = lines.length - 1
+  while (lastContent > firstContent && isBlank(lines[lastContent]!)) lastContent--
+
+  const compacted: string[] = []
+  const rowMap = lines.map(() => 0)
+  let previousBlank = false
+
+  for (let index = firstContent; index <= lastContent; index++) {
+    const line = lines[index]!
+    const blank = isBlank(line)
+    if (blank && previousBlank) {
+      rowMap[index] = compacted.length - 1
+      continue
+    }
+    compacted.push(line)
+    rowMap[index] = compacted.length - 1
+    previousBlank = blank
+  }
+
+  for (let index = 0; index < firstContent; index++) rowMap[index] = 0
+  for (let index = lastContent + 1; index < lines.length; index++) rowMap[index] = compacted.length - 1
+  return { lines: compacted, rowMap }
+}
+
 /** Renders one user turn as a connected vertical activity rail. */
 export class TurnTimeline extends Container {
   private entries: TimelineEntry[] = []
@@ -106,13 +135,15 @@ export class TurnTimeline extends Container {
     for (let entryIndex = 0; entryIndex < this.entries.length; entryIndex++) {
       const entry = this.entries[entryIndex]!
       const renderedWidth = entryIndex === 0 ? width : entryWidth
-      const entryLines = entry.component.render(renderedWidth)
+      const renderedEntryLines = entry.component.render(renderedWidth)
+      const compactedToolRows = entry.kind === 'tool' ? compactToolRows(renderedEntryLines) : undefined
+      const entryLines = compactedToolRows?.lines ?? renderedEntryLines
       if (entry.kind === 'tool') {
         const tool = entry.component as ToolUIComponent
-        for (const target of tool.getInteractionTargets?.(entryLines) ?? []) {
+        for (const target of tool.getInteractionTargets?.(renderedEntryLines) ?? []) {
           this.renderedToolTargets.push({
             ...target,
-            rowOffset: lines.length + target.rowOffset,
+            rowOffset: lines.length + (compactedToolRows?.rowMap[target.rowOffset] ?? target.rowOffset),
             startColumn: target.startColumn + (entryIndex > 0 ? railWidth : 0),
             endColumn: target.endColumn + (entryIndex > 0 ? railWidth : 0),
           })

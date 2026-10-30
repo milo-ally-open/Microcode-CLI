@@ -1,4 +1,4 @@
-import { Box, Container, Text } from '@earendil-works/pi-tui'
+import { Box, Container, Text, truncateToWidth } from '@earendil-works/pi-tui'
 import { theme } from '../theme.ts'
 import { formatCompletedStatus, formatRunningStatus, formatToolLabel, getProgressFrame } from '../toolPresentation.ts'
 import type { ToolResult, ToolUIComponent, ToolInteractionTarget } from '../toolPresentationRegistry.ts'
@@ -14,7 +14,7 @@ interface WebSearchDetails {
 const QUERY_PREVIEW_LEN = 72
 
 function shorten(value: string, length: number): string {
-  return value.length > length ? `${value.slice(0, length)}...` : value
+  return truncateToWidth(value, length, '...')
 }
 
 export class WebSearchToolUI extends Container implements ToolUIComponent {

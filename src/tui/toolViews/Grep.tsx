@@ -94,7 +94,7 @@ export class GrepToolUI extends Container {
         : theme.dim('○')
 
     const pattern = this.args?.pattern || '...'
-    const shortPattern = pattern.length > 40 ? pattern.slice(0, 40) + '...' : pattern
+    const shortPattern = oneLine(String(pattern), 40)
     const mode = this.args?.output_mode || 'content'
     const modeTag = theme.dim(`[${modeLabels[mode] ?? mode}]`)
 

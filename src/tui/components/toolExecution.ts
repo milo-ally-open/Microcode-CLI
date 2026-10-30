@@ -1,4 +1,4 @@
-import { Container, Text } from '@earendil-works/pi-tui'
+import { Container, Text, truncateToWidth } from '@earendil-works/pi-tui'
 import chalk from 'chalk'
 import { theme } from '../theme.ts'
 import {
@@ -9,6 +9,7 @@ import {
 } from '../toolPresentation.ts'
 import { ToolPreviewController } from '../toolPreviewController.ts'
 import type { ToolInteractionTarget } from '../toolPresentationRegistry.ts'
+import { normalizeTerminalText } from '../../utils/terminalText.ts'
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>
@@ -32,7 +33,7 @@ export class ToolExecutionComponent extends Container {
     this.toolName = toolName
     this.args = args
 
-    this.content = new Text('')
+    this.content = new Text('', 1, 0)
     this.addChild(this.content)
     this.updateDisplay()
   }
@@ -118,10 +119,10 @@ export class ToolExecutionComponent extends Container {
 
   private getOutputText(): string {
     if (!this.result?.content) return ''
-    return this.result.content
+    return normalizeTerminalText(this.result.content
       .filter((c) => c.type === 'text')
       .map((c) => c.text ?? '')
-      .join('\n')
+      .join('\n'))
   }
 
   private formatArgs(args: any): string {
@@ -135,14 +136,14 @@ export class ToolExecutionComponent extends Container {
         return `${key}=${val}`
       })
       .join(', ')
-    return summary.length > 112 ? `${summary.slice(0, 109)}…` : summary
+    return truncateToWidth(summary, 112, '…')
   }
 
   private formatOutput(output: string): string {
     const firstLine = output.split(/\r?\n/).find((line) => line.trim())?.trim() ?? ''
     const summary = firstLine.replace(/\s+/g, ' ')
     if (!summary) return ''
-    return summary.length > 120 ? `${summary.slice(0, 117)}…` : summary
+    return truncateToWidth(summary, 120, '…')
   }
 
   private getBoundedOutput(output: string): string {

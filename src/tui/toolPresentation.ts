@@ -1,11 +1,12 @@
 import chalk from 'chalk'
+import { visibleWidth } from '@earendil-works/pi-tui'
 export { countContentLines } from '../utils/textUtils.ts'
 
 const TOOL_LABEL_COLUMN_WIDTH = 12
 
 /** Formats the tool-name column so each tool's argument summary starts together. */
 export function formatToolLabel(icon: string, label: string): string {
-  const padding = ' '.repeat(Math.max(1, TOOL_LABEL_COLUMN_WIDTH - label.length))
+  const padding = ' '.repeat(Math.max(1, TOOL_LABEL_COLUMN_WIDTH - visibleWidth(label)))
   return `${icon} ${chalk.bold(label)}${padding}`
 }
 

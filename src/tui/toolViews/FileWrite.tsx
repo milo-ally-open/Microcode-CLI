@@ -10,6 +10,8 @@ import {
 } from '../toolPresentation.ts'
 import { countContentLines } from '../../utils/textUtils.ts'
 import { ToolPreviewController } from '../toolPreviewController.ts'
+import { normalizeTerminalText } from '../../utils/terminalText.ts'
+import { oneLine } from '../toolPreview.ts'
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>
@@ -218,21 +220,22 @@ export class FileWriteToolUI extends Container {
   }
 
   private appendDiffPreview(lines: string[], content: string): void {
+    const safeContent = normalizeTerminalText(content)
     const hasDiff = Array.isArray(this.details?.diff) && !this.details.diffTruncated
     const diff = hasDiff ? this.details?.diff ?? [] : undefined
-    const totalLines = diff?.length ?? this.getPreviewLineCount(content)
+    const totalLines = diff?.length ?? this.getPreviewLineCount(safeContent)
     const requestedRows = this.preview.visibleRows(totalLines)
     const visibleRows = Math.min(requestedRows, MAX_PREVIEW_LINES)
 
     // 折叠状态不拆分完整文件；展开也限制行数和单行长度，避免大文件拖住 TUI。
     const visibleDiffLines = diff
-      ? diff.slice(0, visibleRows)
-      : takeContentLines(content, visibleRows).map((line) => `+${line}`)
+      ? diff.slice(0, visibleRows).map(normalizeTerminalText)
+      : takeContentLines(safeContent, visibleRows).map((line) => `+${line}`)
     if (visibleDiffLines.length > 0) {
       lines.push(...numberDiffLines(visibleDiffLines).map(({ line, gutter }) => `  ${theme.dim(gutter)}${renderTerminalDiffLine(line)}`))
     }
     if (this.details?.previewNotice) {
-      lines.push(`  ${theme.fg('warning', this.details.previewNotice)}`)
+      lines.push(`  ${theme.fg('warning', normalizeTerminalText(this.details.previewNotice).replace(/\n/g, ' '))}`)
     } else if (this.details?.diffTruncated) {
       lines.push(`  ${theme.fg('warning', 'Diff unavailable for files over 1 MB; proposed content shown as additions')}`)
       if (totalLines > visibleRows) {
@@ -261,9 +264,9 @@ export class FileWriteToolUI extends Container {
 
   private getOutputPreview(): string {
     if (!this.result?.content) return ''
-    return this.result.content
+    return oneLine(this.result.content
       .filter((c) => c.type === 'text')
-      .map((c) => (c.text ?? '').slice(0, 200).replace(/\n/g, ' '))
-      .join(' ')
+      .map((c) => c.text ?? '')
+      .join(' '), 200)
   }
 }

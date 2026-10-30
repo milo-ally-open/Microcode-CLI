@@ -1,8 +1,9 @@
-import { Box, Container, Text } from '@earendil-works/pi-tui'
+import { Box, Container, Text, truncateToWidth } from '@earendil-works/pi-tui'
 import chalk from 'chalk'
 import { theme } from '../theme.ts'
 import { formatCompletedStatus, formatRunningStatus, formatToolLabel, getProgressFrame } from '../toolPresentation.ts'
 import { ToolPreviewController } from '../toolPreviewController.ts'
+import { normalizeTerminalText } from '../../utils/terminalText.ts'
 
 import type { ToolUIComponent, ToolResult } from '../toolPresentationRegistry.ts'
 
@@ -103,10 +104,10 @@ export class BashToolUI extends Container implements ToolUIComponent {
         : theme.dim('○')            // ○
 
     const cmd = this.args?.command ?? ''
-    const shortCmd = cmd.length > COMMAND_PREVIEW_LEN
-      ? cmd.slice(0, COMMAND_PREVIEW_LEN) + '...'
-      : cmd
-    const description = this.args?.description
+    const shortCmd = truncateToWidth(normalizeTerminalText(cmd), COMMAND_PREVIEW_LEN, '...')
+    const description = typeof this.args?.description === 'string'
+      ? normalizeTerminalText(this.args.description)
+      : undefined
     const header = description
       ? `${formatToolLabel(icon, 'bash')}${theme.dim(description)}`
       : `${formatToolLabel(icon, 'bash')}${theme.fg('muted', '$')} ${theme.fg('text', shortCmd)}`
@@ -114,7 +115,7 @@ export class BashToolUI extends Container implements ToolUIComponent {
     this.contentBox.clear()
 
     if (!this.result) {
-      this.contentBox.addChild(new Text(`${header} ${theme.dim(formatRunningStatus(this.elapsedMs))}`))
+      this.contentBox.addChild(new Text(`${header} ${theme.dim(formatRunningStatus(this.elapsedMs))}`, 1, 0))
       return
     }
 
@@ -124,7 +125,7 @@ export class BashToolUI extends Container implements ToolUIComponent {
     if (lines.length === 0 || (lines.length === 1 && !lines[0])) {
       const exitLine = this.renderExitCode()
       const status = theme.dim(formatCompletedStatus(this.elapsedMs))
-      this.contentBox.addChild(new Text(exitLine ? `${header} ${status}\n${exitLine}` : `${header} ${status}`))
+      this.contentBox.addChild(new Text(exitLine ? `${header} ${status}\n${exitLine}` : `${header} ${status}`, 1, 0))
       return
     }
 
@@ -149,16 +150,14 @@ export class BashToolUI extends Container implements ToolUIComponent {
     if (outputText) content += `\n${outputText}`
     if (exitLine) content += `\n${exitLine}`
 
-    this.contentBox.addChild(new Text(content))
+    this.contentBox.addChild(new Text(content, 1, 0))
   }
 
   private renderExitCode(): string {
     if (!this.details || this.executionStarted) return ''
     const { exitCode } = this.details
     if (exitCode === null || exitCode === undefined) return ''
-    if (exitCode === 0) {
-      return theme.dim(`exit: ${exitCode}`)
-    }
+    if (exitCode === 0) return ''
     return theme.fg('error', `exit: ${exitCode}`)
   }
 
@@ -167,16 +166,16 @@ export class BashToolUI extends Container implements ToolUIComponent {
       const { stdout, stderr, output, displayOutput, displayTruncated } = this.details
       if (typeof displayOutput === 'string') {
         const suffix = displayTruncated ? '\n… UI preview capped at 80,000 characters' : ''
-        return `${displayOutput}${suffix}`.trimEnd()
+        return normalizeTerminalText(`${displayOutput}${suffix}`).trimEnd()
       }
-      return (typeof output === 'string' ? output : `${stdout}${stderr}`).trimEnd()
+      return normalizeTerminalText(typeof output === 'string' ? output : `${stdout}${stderr}`).trimEnd()
     }
     if (!this.result?.content) return ''
-    return this.result.content
+    return normalizeTerminalText(this.result.content
       .filter((c) => c.type === 'text')
       .map((c) => c.text ?? '')
       .join('')
-      .trimEnd()
+    ).trimEnd()
   }
 
   private getOutputLines(output = this.getOutput()): string[] {
