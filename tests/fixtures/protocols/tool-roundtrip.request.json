@@ -1,0 +1,52 @@
+{
+  "openai-chat": {
+    "model": "deepseek/deepseek-v4-pro",
+    "messages": [
+      { "role": "user", "content": "Find the answer." },
+      { "role": "assistant", "content": null, "tool_calls": [
+        { "id": "call_fixture", "type": "function", "function": { "name": "lookup", "arguments": "{\"query\":\"answer\"}" } }
+      ] },
+      { "role": "tool", "tool_call_id": "call_fixture", "name": "lookup", "content": "42" }
+    ],
+    "tools": [
+      { "type": "function", "function": { "name": "lookup", "description": "Look up a value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } } }
+    ]
+  },
+  "openai-responses": {
+    "model": "deepseek/deepseek-v4-pro",
+    "input": [
+      { "type": "message", "role": "user", "content": "Find the answer." },
+      { "type": "function_call", "id": "fc_item_fixture", "call_id": "call_fixture", "name": "lookup", "arguments": "{\"query\":\"answer\"}", "status": "completed" },
+      { "type": "function_call_output", "call_id": "call_fixture", "output": "42" }
+    ],
+    "tools": [
+      { "type": "function", "name": "lookup", "description": "Look up a value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } }
+    ]
+  },
+  "gemini-generate": {
+    "model_id": "deepseek/deepseek-v4-pro",
+    "stream": false,
+    "body": {
+      "contents": [
+        { "role": "user", "parts": [{ "text": "Find the answer." }] },
+        { "role": "model", "parts": [{ "functionCall": { "id": "call_fixture", "name": "lookup", "args": { "query": "answer" } } }] },
+        { "role": "user", "parts": [{ "functionResponse": { "id": "call_fixture", "name": "lookup", "response": "42" } }] }
+      ],
+      "tools": [{ "functionDeclarations": [
+        { "name": "lookup", "description": "Look up a value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } }
+      ] }]
+    }
+  },
+  "anthropic-messages": {
+    "model": "deepseek/deepseek-v4-pro",
+    "max_tokens": 32,
+    "messages": [
+      { "role": "user", "content": "Find the answer." },
+      { "role": "assistant", "content": [{ "type": "tool_use", "id": "call_fixture", "name": "lookup", "input": { "query": "answer" } }] },
+      { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "call_fixture", "content": "42" }] }
+    ],
+    "tools": [
+      { "name": "lookup", "description": "Look up a value.", "input_schema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } }
+    ]
+  }
+}

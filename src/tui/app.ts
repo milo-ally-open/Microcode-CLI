@@ -261,7 +261,7 @@ export class App {
     this.unsubscribeRuntimeConnection = agent.subscribeRuntimeConnection?.((connected, error) => {
       if (!connected) {
         runtimeWasConnected = false
-        this.showError(`Runtime connection lost${error ? `: ${error.message}` : ''}. Reconnecting…`)
+        this.showStatus(`Runtime connection interrupted${error ? `: ${error.message}` : ''}. Reconnecting…`)
       } else if (!runtimeWasConnected) {
         runtimeWasConnected = true
         this.showStatus('Runtime connection restored.')
@@ -3887,6 +3887,12 @@ export class App {
           if (event.reason === 'compaction_completed') {
             this.appendContextCompactedEntry()
           }
+          break
+
+        case 'capabilities_changed':
+          this.invalidateChatRender()
+          this.footer.invalidate()
+          this.ui.requestRender()
           break
 
         case 'agent_start':

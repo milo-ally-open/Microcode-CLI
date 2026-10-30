@@ -99,6 +99,7 @@ export async function runRuntimeDaemon(): Promise<void> {
         mcpClient,
         pluginManager,
         standaloneMcpConfigs: standaloneMcp.configs,
+        standaloneMcpServers: standaloneMcp.servers,
         standaloneMcpDiagnostics: standaloneMcp.diagnostics,
         plugins: pluginSnapshot.plugins,
         capabilityDiagnostics,

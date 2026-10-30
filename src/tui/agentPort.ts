@@ -89,6 +89,7 @@ export interface TuiCompactionResult {
 
 export type TuiAgentEvent =
   | { readonly type: 'agent_start' | 'agent_end' | 'turn_start' }
+  | { readonly type: 'capabilities_changed' }
   | { readonly type: 'state_changed'; readonly reason: string }
   | { readonly type: 'compaction_changed'; readonly progress: { readonly phase: string } }
   | { readonly type: 'message_start' | 'message_end'; readonly message: RuntimeMessage }
@@ -111,6 +112,8 @@ export function toTuiAgentEvent(event: RuntimeAgentEvent): TuiAgentEvent | undef
     value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
   switch (event.type) {
     case 'agent_start': case 'agent_end': case 'turn_start':
+      return { type: event.type }
+    case 'capabilities_changed':
       return { type: event.type }
     case 'state_changed':
       return { type: event.type, reason: String(payload.reason ?? '') }

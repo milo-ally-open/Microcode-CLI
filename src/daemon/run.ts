@@ -29,6 +29,7 @@ export async function runGatewayDaemon(): Promise<void> {
     port: server.port,
     protocolVersion: GATEWAY_PROTOCOL_VERSION,
     startedAt: Date.now(),
+    persistent: process.env.MICROCODE_GATEWAY_PERSISTENT === '1',
   })
 
   let stopping = false

@@ -12,7 +12,7 @@ import { GitRepository } from '../../git/GitRepository.ts'
 import { toRuntimeMessage } from '../../kernel/pi/mapper.ts'
 import { toRuntimeAgentEvent, toRuntimeAgentSnapshot } from '../../agent/runtimeProjection.ts'
 import { isRuntimeThinkingLevel, type RuntimeImageInput } from '../../runtime/contracts.ts'
-import type { McpServerState } from '../../mcp/types.ts'
+import type { McpServerState, ResolvedMcpServer } from '../../mcp/types.ts'
 import type { McpClientManager } from '../../mcp/client.ts'
 import { DEFAULT_PROJECT_INSTRUCTIONS_MAX_BYTES, loadProjectInstructions, type ProjectInstructions } from '../../instructions/projectInstructions.ts'
 import { buildInitTaskPrompt, extractInitDraft, getInitProjectFileOutline } from '../../instructions/initProjectGuidance.ts'
@@ -92,6 +92,7 @@ export interface RuntimeAgentSessionOptions {
   mcpClient?: McpClientManager
   pluginManager?: PluginManager
   standaloneMcpConfigs?: Record<string, McpServerConfig>
+  standaloneMcpServers?: readonly ResolvedMcpServer[]
   standaloneMcpDiagnostics?: readonly string[]
   plugins?: readonly RuntimePluginSummary[]
   capabilityDiagnostics?: readonly string[]
@@ -109,6 +110,7 @@ export class RuntimeAgentSession {
   private readonly pluginManager?: PluginManager
   private standaloneMcpDiagnostics: readonly string[]
   private standaloneMcpConfigs: Record<string, McpServerConfig>
+  private standaloneMcpServers: readonly ResolvedMcpServer[]
   private plugins: RuntimePluginSummary[]
   private capabilityDiagnostics: readonly string[]
   private readonly onSessionIdChanged?: RuntimeAgentSessionOptions['onSessionIdChanged']
@@ -133,6 +135,7 @@ export class RuntimeAgentSession {
     mcpClient?: McpClientManager
     pluginManager?: PluginManager
     standaloneMcpConfigs?: Record<string, McpServerConfig>
+    standaloneMcpServers?: readonly ResolvedMcpServer[]
     standaloneMcpDiagnostics?: readonly string[]
     plugins?: RuntimeAgentSessionOptions['plugins']
     capabilityDiagnostics?: RuntimeAgentSessionOptions['capabilityDiagnostics']
@@ -147,6 +150,7 @@ export class RuntimeAgentSession {
     this.mcpClient = options.mcpClient
     this.pluginManager = options.pluginManager
     this.standaloneMcpConfigs = { ...(options.standaloneMcpConfigs ?? {}) }
+    this.standaloneMcpServers = [...(options.standaloneMcpServers ?? [])]
     this.standaloneMcpDiagnostics = [...(options.standaloneMcpDiagnostics ?? [])]
     this.plugins = [...(options.plugins ?? [])]
     this.capabilityDiagnostics = [...(options.capabilityDiagnostics ?? [])]
@@ -214,9 +218,10 @@ export class RuntimeAgentSession {
         sessionId,
         agent,
         mcpClient: options.mcpClient,
-      pluginManager: options.pluginManager,
-      standaloneMcpConfigs: options.standaloneMcpConfigs,
-      standaloneMcpDiagnostics: options.standaloneMcpDiagnostics,
+        pluginManager: options.pluginManager,
+        standaloneMcpConfigs: options.standaloneMcpConfigs,
+        standaloneMcpServers: options.standaloneMcpServers,
+        standaloneMcpDiagnostics: options.standaloneMcpDiagnostics,
         plugins: options.plugins,
         capabilityDiagnostics: options.capabilityDiagnostics,
         onSessionIdChanged: options.onSessionIdChanged,
@@ -298,6 +303,7 @@ export class RuntimeAgentSession {
   private async refreshMcp(): Promise<void> {
     const discovered = await discoverMcpCapabilities(this.cwd)
     this.standaloneMcpConfigs = { ...discovered.configs }
+    this.standaloneMcpServers = [...discovered.servers]
     this.standaloneMcpDiagnostics = [...discovered.diagnostics]
     const snapshot = this.pluginManager?.getSnapshot()
     const diagnostics = [
@@ -605,7 +611,16 @@ export class RuntimeAgentSession {
       case 'mcp.refresh': {
         this.assertAgentIdle()
         await this.refreshMcp()
-        return { server_count: this.mcpClient?.getServerStates().length ?? 0 }
+        return {
+          server_count: this.mcpClient?.getServerStates().length ?? 0,
+          configured_servers: this.standaloneMcpServers.map((server) => ({
+            name: server.name,
+            scope: server.scope,
+            ...(server.packageName ? { package_name: server.packageName } : {}),
+            ...(server.sourcePath ? { source_path: server.sourcePath } : {}),
+            summary: safeMcpConfigSummary(server.config),
+          })),
+        }
       }
       case 'git.status':
         return GitRepository.open(this.cwd).then((repository) => repository.status())

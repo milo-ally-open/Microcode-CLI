@@ -6,6 +6,7 @@ import type { GatewayStreamAdapter, SseEvent } from './streamTypes.ts'
 export class AnthropicMessagesStreamAdapter implements GatewayStreamAdapter {
   private messageId = `msg_${crypto.randomUUID()}`
   private readonly opened = new Set<number>()
+  private readonly textDeltas = new Map<number, string>()
   private readonly argumentLengths = new Map<number, number>()
   private emittedStart = false
 
@@ -32,14 +33,20 @@ export class AnthropicMessagesStreamAdapter implements GatewayStreamAdapter {
         this.opened.add(event.contentIndex)
         yield { event: 'content_block_start', data: { type: 'content_block_start', index: event.contentIndex, content_block: { type: 'text', text: '' } } }
       } else if (event.type === 'text_delta') {
+        this.textDeltas.set(event.contentIndex, (this.textDeltas.get(event.contentIndex) ?? '') + event.delta)
         yield { event: 'content_block_delta', data: { type: 'content_block_delta', index: event.contentIndex, delta: { type: 'text_delta', text: event.delta } } }
       } else if (event.type === 'text_end') {
         if (!this.opened.has(event.contentIndex)) {
           yield { event: 'content_block_start', data: { type: 'content_block_start', index: event.contentIndex, content_block: { type: 'text', text: '' } } }
         }
-        if (event.content) yield { event: 'content_block_delta', data: { type: 'content_block_delta', index: event.contentIndex, delta: { type: 'text_delta', text: event.content } } }
+        const streamedText = this.textDeltas.get(event.contentIndex) ?? ''
+        const finalSuffix = event.content.startsWith(streamedText) ? event.content.slice(streamedText.length) : streamedText ? '' : event.content
+        if (finalSuffix) {
+          yield { event: 'content_block_delta', data: { type: 'content_block_delta', index: event.contentIndex, delta: { type: 'text_delta', text: finalSuffix } } }
+        }
         yield { event: 'content_block_stop', data: { type: 'content_block_stop', index: event.contentIndex } }
         this.opened.delete(event.contentIndex)
+        this.textDeltas.delete(event.contentIndex)
       } else if (event.type === 'thinking_start') {
         for (const output of this.start(event.partial)) yield output
         this.opened.add(event.contentIndex)

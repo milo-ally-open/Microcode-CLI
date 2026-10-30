@@ -110,6 +110,7 @@
 - **AC-07.4** 权限确认、问题回答、取消、输入和工具/模型状态更新均由同一 event/command 合同往返。
 - **AC-07.5** Chalk TUI 可断线重连、显示服务错误和恢复状态；UI 不伪造服务端权限、会话或 tool status。
 - **AC-07.6** no-daemon 保留明确的进程内 Pi 路径；默认连接失败可见并按文档定义的策略处理，不会静默降低安全边界。
+- **AC-07.7** 用户通过 `/exit`、退出型 Ctrl+C 或 SIGTERM 有序结束 TUI 时，CLI 先取消活动 turn、关闭 runtime client，再请求停止 Agent Runtime 和 TUI 启动的临时 Gateway；关机等待两个服务的监听端口关闭且记录的进程 PID 退出后才退出。显式启动为持久模式的 Gateway 不随 TUI 关闭。
 
 **验证方式**：客户端/服务器 transport contract tests、进程启动/重连/退出集成检查。
 
@@ -153,23 +154,26 @@
 
 | 上游条款 | REQ | 模块/服务 | 任务 ID | AC | 验收证据/状态 |
 |---|---|---|---|---|---|
-| 用户架构第 1、2 层 | REQ-01 / REQ-02 | src/kernel、src/agent、src/daemon/runtime | T-02 | AC-01.1 至 AC-02.3 | Kernel/Pi adapter 与 Pi-free runtime transport DTO 已建立；MicrocodeAgent core 的消息、模型、compaction 与 kernel 调用经通用 adapter 注入，仍待活动 RuntimeAgentSession 使用 kernel-neutral composition 的跨进程验收 |
-| 用户模型最小支持与 feature 演进 | REQ-03 | src/models/providers、src/models/registry、src/models/runtime.ts | T-03 | AC-03.1 至 AC-03.4 | 三个 provider allowlist 与 kernel-neutral model runtime/inference DTO 已建立，Pi 转换集中在 kernel adapter，provider capability matrix 已记录锁定 catalog；auth/stream 端到端验收待完成 |
-| 用户模型协议清单 | REQ-04 | src/daemon/protocol、src/daemon/server | T-04 | AC-04.1 至 AC-04.5 | 四种协议路由、unary parser/serializer、SSE adapter 和 capability/error matrix 已存在并按协议拆分；固定协议 fixture 与版本化 client smoke 仍待验收 |
-| 用户工具接入及运行时修改 | REQ-05 | src/tools、src/agent/AgentToolManager | T-05 | AC-05.1 至 AC-05.6 | 静态 registry、runtime mutation 与受保护工具控制已实现；presentation import boundary 已拆分，服务端版本冲突与 TUI 事件验收待做 |
-| 用户明确保留能力系统 | REQ-06 | src/skill、src/mcp、src/plugins | T-06 | AC-06.1 至 AC-06.3 | Runtime child 持有能力发现、连接及 enable/refresh 命令；TUI 默认路径使用安全摘要 DTO，能力规范回归验收待做 |
-| 用户 UI/服务端前后端分离 | REQ-07 | src/daemon、src/tui、src/main.tsx | T-07 / T-08 | AC-07.1 至 AC-07.6 | 默认 main path 使用 launcher、HTTP/SSE client 与 runtime facades；transcript/event/current-model/model-catalog/auth DTO 已与 Pi 分离，标题建议走 Runtime 命令，UI 重连提示已接入；auth prompt 往返与交互/子进程 smoke、完整 view contract 验收待做 |
-| 用户要求持续演进和兼容 | REQ-08 | tests、docs/specs/runtime-architecture | T-01 / T-09 | AC-08.1 至 AC-08.4 | 文档完成；运行时待实施 |
+| 用户架构第 1、2 层 | REQ-01 / REQ-02 | src/kernel、src/agent、src/daemon/runtime | T-02 | AC-01.1 至 AC-02.3 | Kernel contract、Pi adapter、Pi-free Agent/runtime DTO 与版本化 wire DTO 已建立；默认 runtime 由 composition root 组合 Pi adapter，跨路径 session、runtime host 和权限路径有验收；不声称已替换 Pi 或提供第二个生产内核 |
+| 用户模型最小支持与 feature 演进 | REQ-03 | src/models/providers、src/models/registry、src/models/runtime.ts | T-03 | AC-03.1 至 AC-03.4 | 固定 provider fixture 覆盖三个 allowlisted provider/API/auth、代表模型 image/reasoning/context/output metadata、API-key/OAuth lifecycle、DeepSeek usage 及 image/reasoning pre-inference rejection；未调用 Codex/OpenAI 上游服务 |
+| 用户模型协议清单 | REQ-04 | src/daemon/protocol、src/daemon/server | T-04 | AC-04.1 至 AC-04.5 | 四协议工具往返、SSE 顺序、unsupported request、流错误、断连取消均有固定 fixture；OpenAI Node SDK 6.40.0 对本地 fake runtime Gateway 成功请求。Codex CLI hosted `custom` 仍按设计拒绝，不代表支持 hosted-tool 执行 |
+| 用户工具接入及运行时修改 | REQ-05 | src/tools、src/agent/AgentToolManager | T-05 | AC-05.1 至 AC-05.6 | 静态 registry、runtime mutation、受保护工具控制、服务端版本冲突、客户端刷新重试、capability event 与 TUI snapshot 更新均有测试 |
+| 用户明确保留能力系统 | REQ-06 | src/skill、src/mcp、src/plugins | T-06 | AC-06.1 至 AC-06.3 | runtime child 持有发现、连接及 enable/refresh；测试覆盖 Plugin Skill scope/load、MCP legacy source、deny 保持、secret-safe DTO 与 capability event |
+| 用户 UI/服务端前后端分离 | REQ-07 | src/daemon、src/tui、src/main.tsx | T-07 / T-08 / T-11 | AC-07.1 至 AC-07.7 | 默认入口使用 runtime launcher、HTTP/SSE client 和 facades；进程 auth prompt/关闭重启/多客户端竞争、断线恢复、有序退出 PID 清理、TUI event/view contract、输入遮罩与 Gateway 交互边界均有验收；显式 `--no-daemon` 路径保留 |
+| 用户要求持续演进和兼容 | REQ-08 | tests、docs/specs/runtime-architecture | T-01 / T-09 / T-10 | AC-08.1 至 AC-08.4 | 历史 v3 JSONL fixture 可读且源文件不改写；runtime service 与 `--no-daemon` 可恢复同一 transcript；model/tool contribution guides 与 provider/protocol capability matrices 已建立并关联固定 fixtures；最终全量验收状态见 tasks.md |
 
 ## 假设与未决问题
 
 - [假设] provider 白名单限制上游账户集；Gemini 与 Anthropic 是 Gateway 客户端协议。若用户原意是允许对应上游 provider/key，需要另行更新 REQ-03。
 - 首个默认工具集合已确认并记入 proposal/design/tool guide：read/write/edit/bash/grep/glob、Ask、skill、search 与受保护的 tool_control；其余内置工具可切换但默认停用。
 - [待验证] Gemini 首发范围以官方 REST Generate Content 与 streamGenerateContent 接口为起点，不覆盖 Interactions、Live API、embedding、media API，除非对应 Pi 模型 provider 和 feature 明确支持。
-- [待验证] runtime event transport 的具体 Bun API 和 Windows 子进程启动/锁/恢复行为在 T-07 的可测试设计评审中锁定。
+- Runtime event transport 已固定为 Bun loopback HTTP/SSE 与版本化命令/event DTO；Windows child 生命周期、shutdown/restart 与 reconnect 已有当前进程级测试，细项见 tasks.md。
+- 交互式 CLI 的 `/exit`、退出型 Ctrl+C 和 SIGTERM 现在按 AC-07.7 有序停止 runtime 与临时 Gateway 子进程；`microcode gateway start` 明确保留持久服务生命周期。
 
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-28 | 根据运行时代码与新增验收更新 REQ 到任务状态映射；记录 provider/protocol fixture 与成功外部客户端 smoke 的剩余范围 |
+| 2026-10-30 | 增加 AC-07.7，规定交互式退出时等待 Runtime 与临时 Gateway 子进程退出；显式 Gateway start 仍可持久运行 |
 | 2026-10-27 | 初稿：定义层边界、初始 provider/auth 白名单、四种网关协议、工具变更和客户端/服务端分离 |

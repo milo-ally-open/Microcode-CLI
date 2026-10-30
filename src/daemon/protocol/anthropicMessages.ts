@@ -13,12 +13,22 @@ export function parseAnthropicRequest(value: unknown): GatewayChatRequest {
   if (!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > 500) shared.fail('messages must contain between 1 and 500 entries.')
   const messages: ModelPromptMessage[] = []
   if (body.system !== undefined) messages.push(shared.systemMessage(shared.contentText(body.system, 'system')))
+  const toolNames = new Map<string, string>()
   for (let index = 0; index < body.messages.length; index++) {
     const item = shared.record(body.messages[index], `messages[${index}]`)
     shared.rejectUnknownFields(item, ['role', 'content'], `messages[${index}]`)
     const role = shared.string(item.role, `messages[${index}].role`)
     if (role !== 'user' && role !== 'assistant') shared.fail(`Unsupported Anthropic message role: ${role}.`)
-    messages.push(...shared.anthropicContent(item.content, `messages[${index}].content`, role))
+    for (const message of shared.anthropicContent(item.content, `messages[${index}].content`, role)) {
+      if (message.role === 'assistant') {
+        for (const block of message.content) {
+          if (block.type === 'tool_call') toolNames.set(block.id, block.name)
+        }
+      } else if (message.role === 'tool_result') {
+        message.toolName = toolNames.get(message.toolCallId) ?? message.toolName
+      }
+      messages.push(message)
+    }
   }
   const tools = shared.parseTools(body.tools, 'anthropic')
   const context: ModelInferenceContext = { messages, ...(tools ? { tools } : {}) }

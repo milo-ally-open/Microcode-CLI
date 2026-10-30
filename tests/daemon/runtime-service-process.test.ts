@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { RuntimeServiceClient } from '../../src/runtime/transportClient.ts'
 import { getOrCreateRuntimeToken, readRuntimeMetadata, removeRuntimeMetadata, runtimeInstanceKey } from '../../src/daemon/runtime-service/config.ts'
+import { stopRuntimeService } from '../../src/daemon/runtime-service/lifecycle.ts'
 
 setDefaultTimeout(60_000)
 
@@ -151,7 +152,15 @@ describe('runtime service Windows subprocess contract', () => {
     expect(rejected.reason).toMatchObject({ code: 'stale_tool_snapshot' })
     await resumedIterator.return(undefined as never)
 
-    await reconnected.shutdown(AbortSignal.timeout(2_000))
+    await stopRuntimeService({
+      key,
+      baseUrl,
+      token,
+      sessionId: ready.sessionId,
+      cwd,
+      metadata: ready,
+      client: reconnected,
+    })
     expect(await waitForExit(initial.process, initial.output)).toBe(0)
     expect(await readRuntimeMetadata(key)).toBeUndefined()
 

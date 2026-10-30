@@ -1,0 +1,15 @@
+{
+  "openai-chat": ["assistant_role", "text_delta", "tool_call_start", "tool_arguments_delta", "tool_arguments_delta", "finish", "done_marker"],
+  "openai-responses": [
+    "response.created", "response.in_progress", "response.output_item.added", "response.content_part.added",
+    "response.output_text.delta", "response.output_text.done", "response.content_part.done",
+    "response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.delta",
+    "response.function_call_arguments.done", "response.output_item.done", "response.output_item.done", "response.completed"
+  ],
+  "gemini-generate": ["text_delta", "tool_call", "finish"],
+  "anthropic-messages": [
+    "message_start", "content_block_start", "content_block_delta", "content_block_stop",
+    "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop",
+    "message_delta", "message_stop"
+  ]
+}

@@ -1,0 +1,14 @@
+[
+  {
+    "modelId": "deepseek/deepseek-v4-pro",
+    "feature": "image",
+    "status": 400,
+    "message": "The selected model does not support image input."
+  },
+  {
+    "modelId": "openai/gpt-4o",
+    "feature": "reasoning",
+    "status": 400,
+    "message": "The selected model does not support reasoning controls."
+  }
+]

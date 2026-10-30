@@ -30,7 +30,8 @@ import { LocalTuiGitPort } from './tui/localGitAdapter.ts'
 import { RuntimeTuiGitPort } from './tui/runtimeGitFacade.ts'
 import { RuntimeClientSession } from './runtime/client.ts'
 import { ensureRuntimeService } from './daemon/runtime-service/lifecycle.ts'
-import { ensureGatewayDaemon, getGatewayStatus, rotateGatewayToken, showGatewayToken, stopGatewayDaemon } from './daemon/lifecycle.ts'
+import { ensureGatewayDaemon, getGatewayStatus, rotateGatewayToken, showGatewayToken, stopGatewayDaemon, stopTransientGatewayDaemon } from './daemon/lifecycle.ts'
+import { shutdownInteractiveDaemons } from './daemon/interactiveLifecycle.ts'
 import { runGatewayDaemon } from './daemon/run.ts'
 import { initializeTuiModelTransport } from './daemon/startup.ts'
 import { GATEWAY_PROTOCOL_VERSION } from './daemon/server.ts'
@@ -355,6 +356,7 @@ function createGatewayBindControl(
 ) {
   if (!gatewayClient) return undefined
   let activeGatewayHost = gatewayClient.bindHost
+  let persistent = gatewayClient.persistent
   return {
     getBindHost: () => activeGatewayHost ?? configuredGatewayHost(gatewayHostOverride),
     setBindHost: async (host: string) => {
@@ -363,18 +365,20 @@ function createGatewayBindControl(
       await setConfiguredGatewayHost(host)
       try {
         await stopGatewayDaemon()
-        const connection = await ensureGatewayDaemon(gatewayPortOverride, host)
+        const connection = await ensureGatewayDaemon(gatewayPortOverride, host, { persistent })
         await new GatewayClient(connection).handshake()
         gatewayClient.setConnection(connection)
         activeGatewayHost = host
+        persistent = connection.persistent
       } catch (error) {
         await stopGatewayDaemon().catch(() => undefined)
         await setConfiguredGatewayHost(previousHost)
         try {
-          const restored = await ensureGatewayDaemon(gatewayPortOverride, previousHost)
+          const restored = await ensureGatewayDaemon(gatewayPortOverride, previousHost, { persistent })
           await new GatewayClient(restored).handshake()
           gatewayClient.setConnection(restored)
           activeGatewayHost = previousHost
+          persistent = restored.persistent
         } catch (restoreError) {
           throw new Error(`${error instanceof Error ? error.message : String(error)}; restoring the previous gateway address also failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
         }
@@ -466,7 +470,12 @@ export async function main(): Promise<void> {
   let gatewayClient: GatewayClient | undefined
   let gatewayStartupMessage: { message: string; kind: 'success' | 'error' } | undefined
   if (!args.includes('--no-daemon')) {
-    const transport = await initializeTuiModelTransport(() => ensureGatewayDaemon(gatewayPortOverride, gatewayHostOverride), fetch, process.cwd(), modelId)
+    const transport = await initializeTuiModelTransport(
+      () => ensureGatewayDaemon(gatewayPortOverride, gatewayHostOverride, { persistent: false }),
+      fetch,
+      process.cwd(),
+      modelId,
+    )
     if (transport.mode === 'gateway') {
       gatewayClient = transport.client
       gatewayStartupMessage = {
@@ -546,6 +555,7 @@ export async function main(): Promise<void> {
         ...(thinkingLevel ? { thinkingLevel } : {}),
       })
     } catch (error) {
+      await stopTransientGatewayDaemon().catch(() => undefined)
       console.error(`Could not start the Bun runtime service: ${error instanceof Error ? error.message : String(error)}`)
       process.exitCode = 1
       return
@@ -565,6 +575,7 @@ export async function main(): Promise<void> {
       if (thinkingLevel) await runtimeSession.sendCommand('thinking.set', { level: thinkingLevel })
     } catch (error) {
       await runtimeSession.close().catch(() => undefined)
+      await shutdownInteractiveDaemons(runtimeConnection, runtimeConnection.sessionId).catch(() => undefined)
       console.error(`Could not connect to the Bun runtime service: ${error instanceof Error ? error.message : String(error)}`)
       process.exitCode = 1
       return
@@ -590,14 +601,24 @@ export async function main(): Promise<void> {
     const closeRuntimeClient = async () => {
       if (closingRuntimeClient) return
       closingRuntimeClient = true
+      app.stop()
       const sessionId = remoteSessions.getSessionId()
       await remoteModel.dispose().catch(() => undefined)
       remoteAgent.dispose()
       await remoteSessions.close().catch(() => undefined)
-      app.stop()
+      const shutdownErrors: string[] = []
+      try {
+        await shutdownInteractiveDaemons(runtimeConnection, sessionId ?? runtimeConnection.sessionId)
+      } catch (error) {
+        const details = error instanceof AggregateError
+          ? error.errors.map((failure) => failure instanceof Error ? failure.message : String(failure)).join('; ')
+          : error instanceof Error ? error.message : String(error)
+        shutdownErrors.push(details)
+      }
       if (sessionId) console.log(`\nResume this session with: microcode --resume ${sessionId.slice(0, 8)}`)
       cleanupImageCache(sessionId ?? '')
-      process.exit(0)
+      if (shutdownErrors.length > 0) console.error(`Microcode could not fully stop its background services: ${shutdownErrors.join('; ')}`)
+      process.exit(shutdownErrors.length > 0 ? 1 : 0)
     }
     app.onExit = closeRuntimeClient
     process.once('SIGINT', () => { void closeRuntimeClient() })
@@ -745,22 +766,6 @@ export async function main(): Promise<void> {
   )
 
   // Handle exit from TUI (Ctrl+C, Ctrl+D, Escape)
-  app.onExit = async () => {
-    try {
-      await agent.persistMessages()
-    } catch {
-      // Ignore save errors on shutdown
-    }
-    await sessionManager.close()
-    await mcpClient.disconnectAll()
-    const sessionId = sessionManager.getSessionId()
-    if (sessionId) {
-      console.log(`\nResume this session with: microcode --resume ${sessionId.slice(0, 8)}`)
-    }
-    cleanupImageCache(sessionId ?? '')
-    process.exit(0)
-  }
-
   // Connect MCP servers in background — non-blocking
   const standaloneRegistry = await discoverMcpCapabilities(cwd)
   for (const warning of standaloneRegistry.diagnostics) app.addStartupWarning(warning)
@@ -786,31 +791,25 @@ export async function main(): Promise<void> {
   }
 
   // Handle graceful shutdown
-  const shutdown = async () => {
-    // Save session before exit
-    try {
-      await agent.persistMessages()
-    } catch {
-      // Ignore save errors on shutdown
-    }
-    await sessionManager.close()
-    await mcpClient.disconnectAll()
-    app.stop()
-    // Print resume command
-    const sessionId = sessionManager.getSessionId()
-    if (sessionId) {
-      console.log(`\nResume this session with: microcode --resume ${sessionId.slice(0, 8)}`)
-    }
-    cleanupImageCache(sessionId ?? '')
-    process.exit(0)
+  let localShutdown: Promise<void> | undefined
+  const shutdown = (): Promise<void> => {
+    if (localShutdown) return localShutdown
+    localShutdown = (async () => {
+      app.stop()
+      await agent.persistMessages().catch(() => undefined)
+      await sessionManager.close().catch(() => undefined)
+      await mcpClient.disconnectAll().catch(() => undefined)
+      const sessionId = sessionManager.getSessionId()
+      if (sessionId) console.log(`\nResume this session with: microcode --resume ${sessionId.slice(0, 8)}`)
+      cleanupImageCache(sessionId ?? '')
+      process.exit(0)
+    })()
+    return localShutdown
   }
+  app.onExit = shutdown
 
-  process.on('SIGINT', () => {
-    void shutdown()
-  })
-  process.on('SIGTERM', () => {
-    void shutdown()
-  })
+  process.once('SIGINT', () => { void shutdown() })
+  process.once('SIGTERM', () => { void shutdown() })
 
   // If there's an initial prompt argument, send it after app starts
   const initialPrompt = filteredArgs.join(' ')

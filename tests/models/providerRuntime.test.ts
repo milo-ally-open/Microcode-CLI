@@ -75,6 +75,8 @@ describe('model provider runtime', () => {
       expect(observed.model).toBe('deepseek-v4-pro')
       expect(events.some((event) => event.type === 'text_delta' && event.delta === 'provider stream fixture')).toBe(true)
       expect(events.some((event) => event.type === 'done')).toBe(true)
+      const completed = events.find((event) => event.type === 'done')
+      expect(completed?.type === 'done' ? completed.message.usage : undefined).toMatchObject({ input: 4, output: 3, totalTokens: 7 })
       expect(JSON.stringify(events)).not.toContain('runtime-provider-smoke-key')
     } finally {
       server.stop(true)

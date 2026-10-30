@@ -5,6 +5,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { configureLoopbackProxyBypass } from '../../src/daemon/proxy.ts'
+import { isPersistentGateway } from '../../src/daemon/lifecycle.ts'
 
 configureLoopbackProxyBypass()
 // These tests start several Bun CLI processes; Windows startup can exceed Bun's 5s default.
@@ -85,6 +86,9 @@ describe('Model Gateway daemon lifecycle', () => {
     const metadataPath = join(home, '.microcode', 'daemon', 'daemon.json')
     const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as { pid: number; port: number; protocolVersion: number }
     expect(metadata).toMatchObject({ port, protocolVersion: 1 })
+    expect(isPersistentGateway(metadata)).toBe(true)
+    expect(isPersistentGateway(undefined)).toBe(false)
+    expect(isPersistentGateway({ persistent: false })).toBe(false)
 
     const status = await runCli(['gateway', 'status'], env)
     expect(status.code).toBe(0)
@@ -102,6 +106,7 @@ describe('Model Gateway daemon lifecycle', () => {
     const stopped = await runCli(['gateway', 'stop'], env)
     expect(stopped.code).toBe(0)
     expect(stopped.stdout).toContain('Model Gateway stopped.')
+    expect(() => process.kill(metadata.pid, 0)).toThrow()
 
     const rotation = await runCli(['gateway', 'token', '--rotate', '--gateway-port', String(port)], env)
     expect(rotation.code).toBe(0)

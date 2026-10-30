@@ -29,6 +29,7 @@
 - 规定四种网关协议的最小兼容面和不支持请求的可见错误。
 - 规定模型和工具 feature 的贡献流程、测试位置、权限边界和发布验收。
 - 以独立进程服务化 Agent runtime，并让 TUI 经版本化传输连接。
+- 用户通过 `/exit`、退出型 Ctrl+C 或终止信号结束 TUI 时，保存 session 并关闭该交互会话启动的后台进程，避免 Windows 安装程序被仍在运行的 CLI executable 锁住。
 - 保留 Skills、MCP、Plugin、权限、session JSONL 与 Model Gateway 现有外部接入能力。
 
 ### 本次不包含 / 保持不变
@@ -71,6 +72,7 @@
 
 - 影响模型目录与登录、Agent 创建/消息/事件、工具审批与动态发现、session 生命周期、MCP、Plugin、CLI 参数、daemon 启停、Gateway 客户端及 TUI 状态投影。
 - 服务端/客户端协议需处理版本协商、流重连、事件回放、权限 prompt 往返和命令幂等。
+- TUI 自动启动的 Gateway 应标记为临时服务并在有序退出时停止；显式 `microcode gateway start` 启动的 Gateway 保持独立生命周期。
 - 初始供应商限制会使当前其余 Pi provider 与自定义模型不再出现在模型目录；现有加密凭据不得因此被记录、打印或静默删除。
 - session JSONL 与已有配置文件暂不迁移或覆盖；不支持的旧模型配置给出明确诊断，数据保留供用户恢复或手工迁移。
 - 本地 runtime API 如暴露到外部会把权限、会话和工具控制面开放给远程调用方，因此必须只绑定回环地址并单独认证。

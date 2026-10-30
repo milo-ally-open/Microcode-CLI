@@ -14,6 +14,12 @@ The counts and feature flags above are catalog metadata, not a guarantee that ev
 
 The reviewed registrations are in `src/models/providers/openai-codex.ts`, `openai.ts`, and `deepseek.ts`; the allowlist and adapter validation are in `src/models/providers/index.ts` and `registry.ts`. `getModelCatalog()` is the client-safe source of current model IDs and metadata. It does not expose Pi provider objects, endpoints, or credentials.
 
+## Fixed provider/API fixtures
+
+`tests/fixtures/models/provider-capabilities.expected.json` pins representative capability metadata from pi-ai 0.87.1 across all three allowed API combinations. It includes image-capable and text-only DeepSeek models plus the OpenAI GPT-4o reasoning-negative case. `tests/models/providerCapabilityFixtures.test.ts` checks the fixture against `getModelCatalog()`, exercises OpenAI and DeepSeek API-key login plus an offline Codex OAuth login fixture, and confirms secrets do not appear in status DTOs. The paired rejection fixture verifies that image input to `deepseek/deepseek-v4-pro` and reasoning controls to `openai/gpt-4o` fail before inference begins. `tests/models/providerRuntime.test.ts` runs a real pinned DeepSeek adapter against a local SSE stub and verifies the authorization header, selected model, text event, and reported usage.
+
+These fixtures establish registered metadata and facade behavior for each provider/API/auth combination. They do not make live Codex or OpenAI upstream requests; OAuth and auth lifecycle tests use local fixtures.
+
 ## Gateway client protocols
 
 These dialects are independent of the upstream API selected by a model:

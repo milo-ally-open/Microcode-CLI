@@ -14,6 +14,8 @@ export interface GatewayMetadata {
   port: number
   protocolVersion: number
   startedAt: number
+  /** True when started with `microcode gateway start`; TUI-started gateways are transient. */
+  persistent?: boolean
 }
 
 export function getGatewayDirectory(): string {
@@ -277,7 +279,8 @@ export async function getOrCreateGatewayRpcToken(): Promise<string> {
 export async function readGatewayMetadata(): Promise<GatewayMetadata | undefined> {
   try {
     const parsed = JSON.parse(await readFile(getGatewayMetadataPath(), 'utf8')) as Partial<GatewayMetadata>
-    if (typeof parsed.pid !== 'number' || typeof parsed.port !== 'number' || typeof parsed.host !== 'string' || typeof parsed.protocolVersion !== 'number' || typeof parsed.startedAt !== 'number') return undefined
+    if (typeof parsed.pid !== 'number' || typeof parsed.port !== 'number' || typeof parsed.host !== 'string' || typeof parsed.protocolVersion !== 'number' || typeof parsed.startedAt !== 'number'
+      || (parsed.persistent !== undefined && typeof parsed.persistent !== 'boolean')) return undefined
     return parsed as GatewayMetadata
   } catch {
     return undefined

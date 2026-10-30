@@ -71,7 +71,19 @@ export class RuntimeClientSession {
     if (this.closed) throw new RuntimeServiceClientError('Runtime client session is closed.', 409, 'session_closed')
     const previousSessionId = this.sessionIdValue
     let sessionChanged = false
-    const result = await this.client.sendCommand<T>(this.sessionIdValue, type, payload, undefined, this.controller.signal)
+    let result: T
+    try {
+      result = await this.client.sendCommand<T>(this.sessionIdValue, type, payload, undefined, this.controller.signal)
+    } catch (error) {
+      if (type !== 'tool.set' || !(error instanceof RuntimeServiceClientError) || error.code !== 'stale_tool_snapshot') throw error
+      const snapshot = await this.refreshSnapshot(this.controller.signal, true)
+      const latestVersion = snapshot.tools.version
+      if (!Number.isSafeInteger(latestVersion) || latestVersion < 1) throw error
+      result = await this.client.sendCommand<T>(this.sessionIdValue, type, {
+        ...payload,
+        expected_version: latestVersion,
+      }, undefined, this.controller.signal)
+    }
     if ((type === 'session.clear' || type === 'session.open') && result && typeof result === 'object' && 'session_id' in result
       && typeof (result as { session_id?: unknown }).session_id === 'string') {
       this.sessionIdValue = (result as { session_id: string }).session_id
@@ -104,7 +116,7 @@ export class RuntimeClientSession {
 
   private async consumeEvents(): Promise<void> {
     let delayMs = 100
-    let connected = false
+    let connected = this.connected
     while (!this.closed && !this.controller.signal.aborted) {
       const streamController = new AbortController()
       this.eventStreamController = streamController
@@ -126,12 +138,15 @@ export class RuntimeClientSession {
           } else if (event.type === 'agent_end' && this.snapshotValue) {
             this.snapshotValue = { ...this.snapshotValue, is_streaming: false, pending_tool_call_count: 0 }
           }
+          if (event.type === 'capabilities_changed') {
+            await this.refreshSnapshot(this.controller.signal, true).catch(() => undefined)
+          }
           for (const callback of [...this.callbacks]) {
             try { callback.onEvent?.(event) } catch { /* A view callback cannot stop event delivery. */ }
           }
           connected = true
           delayMs = 100
-          if (event.type === 'agent_end' || event.type === 'turn_end' || event.type === 'capabilities_changed') {
+          if (event.type === 'agent_end' || event.type === 'turn_end') {
             void this.refreshSnapshot(this.controller.signal).catch(() => undefined)
           }
         }

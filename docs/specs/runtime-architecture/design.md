@@ -84,7 +84,7 @@ Runtime daemon 的配置放在 `~/.microcode/runtime/{per-workspace-session-key}
 
 ### 5. 启动、回退和数据
 
-TUI launcher 启动或复用兼容 runtime daemon，握手通过后创建 client。失败展示原因。no-daemon 明确走 in-process kernel/runtime adapter。session JSONL 继续由唯一 SessionManager 写入；daemon 重启后读取既有文件。TUI disconnect 不停止共享 daemon，不以空 transcript 覆盖服务端数据。
+TUI launcher 启动或复用兼容 runtime daemon，握手通过后创建 client。失败展示原因。no-daemon 明确走 in-process kernel/runtime adapter。session JSONL 继续由唯一 SessionManager 写入；daemon 重启后读取既有文件。临时 transport 断连只重连，不停止 runtime；用户有序退出时先中止活动 turn、关闭 client，再通过认证 shutdown 停止 runtime，并等待 listener 关闭和记录 PID 退出。TUI 自动启动的 Model Gateway 在 metadata 中标为临时服务并随 TUI 有序退出停止；`microcode gateway start` 标记为持久服务，退出 TUI 时保留。两个 daemon 的 stop helper 都等待实际子进程退出，不能只依据 HTTP listener 已关闭判断完成。
 
 旧 model config 中不支持的 provider 不注册、不自动请求、不删除；诊断指向模型接入指南。旧加密凭据保留但不可从当前 registry 使用。按用户要求直接在 `main` 上暂存改造，不创建新分支或提交；如需回退可撤销本次改造 diff，保留已有未暂存的 `src/macro.ts` 修改。避免不可逆 session/config 变更。
 
@@ -132,3 +132,4 @@ TUI launcher 启动或复用兼容 runtime daemon，握手通过后创建 client
 | 2026-10-27 | 初稿：定义边界、provider/dialect 矩阵、runtime transport、工具 snapshot 与回退 |
 | 2026-10-27 | 首批基础工具集及静态注册扩展工具的 runtime 启停路径落入 T-05；服务端 command/event 投影仍由 T-07 实施 |
 | 2026-10-27 | 将内置工具 View、进度文案、输入投影与审批预览从 `src/tools` runtime registry 移到 `src/tui/toolPresentationRegistry.ts`；工具实现入口不再静态导入 `UI.tsx` |
+| 2026-10-30 | `/exit`、退出型 Ctrl+C 与 SIGTERM 统一清理 Runtime 和临时 Gateway；停止流程等待 daemon PID 退出，Gateway 显式 `start` 保持持久生命周期 |

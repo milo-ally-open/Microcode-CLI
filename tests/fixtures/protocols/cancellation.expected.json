@@ -1,0 +1,6 @@
+{
+  "openai-chat": { "route": "/v1/chat/completions", "abortsProvider": true },
+  "openai-responses": { "route": "/v1/responses", "abortsProvider": true },
+  "gemini-generate": { "route": "/v1beta/models/deepseek/deepseek-v4-pro:streamGenerateContent", "abortsProvider": true },
+  "anthropic-messages": { "route": "/v1/messages", "abortsProvider": true }
+}

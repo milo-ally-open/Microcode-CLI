@@ -19,6 +19,8 @@ import {
   resolveGatewayHost,
   resolveGatewayPort,
   removeGatewayMetadata,
+  writeGatewayMetadata,
+  type GatewayMetadata,
 } from './config.ts'
 import { GATEWAY_PROTOCOL_VERSION } from './server.ts'
 
@@ -28,6 +30,12 @@ export interface GatewayConnection {
   token: string
   rpcToken: string
   baseUrl: string
+  persistent: boolean
+}
+
+export interface EnsureGatewayOptions {
+  /** Keep the gateway running after the caller exits. TUI launches are transient. */
+  persistent?: boolean
 }
 
 export interface GatewayStatus {
@@ -118,7 +126,7 @@ async function acquireStartupLock(): Promise<() => Promise<void>> {
   })
 }
 
-function spawnGateway(port: number, host: string): void {
+function spawnGateway(port: number, host: string, persistent: boolean): void {
   const entry = process.argv[1]
   const args = entry && /\.(?:[cm]?js|tsx?)$/i.test(entry) ? [entry] : []
   const child = spawn(process.execPath, args, {
@@ -128,6 +136,7 @@ function spawnGateway(port: number, host: string): void {
       MICROCODE_GATEWAY_CHILD: '1',
       MICROCODE_GATEWAY_PORT: String(port),
       MICROCODE_GATEWAY_HOST: host,
+      MICROCODE_GATEWAY_PERSISTENT: persistent ? '1' : '0',
     },
     detached: true,
     stdio: 'ignore',
@@ -152,7 +161,12 @@ async function waitForGateway(token: string, port: number, host: string, timeout
   throw new Error(`Model Gateway did not become ready at ${host}:${port}. Use 'microcode gateway status' for diagnostics.`)
 }
 
-export async function ensureGatewayDaemon(portOverride?: string, hostOverride?: string): Promise<GatewayConnection> {
+export async function ensureGatewayDaemon(
+  portOverride?: string,
+  hostOverride?: string,
+  options: EnsureGatewayOptions = {},
+): Promise<GatewayConnection> {
+  const requestedPersistent = options.persistent ?? true
   const port = configuredGatewayPort(portOverride)
   const host = configuredGatewayHost(hostOverride)
   let token = await getOrCreateGatewayToken()
@@ -190,7 +204,7 @@ export async function ensureGatewayDaemon(portOverride?: string, hostOverride?: 
             throw new Error(`Port ${port} is already in use by a service that is not this Microcode Gateway.`)
           }
           await removeGatewayMetadata()
-          spawnGateway(port, host)
+          spawnGateway(port, host, requestedPersistent)
           status = await waitForGateway(token, port, host)
         }
       } finally {
@@ -198,7 +212,18 @@ export async function ensureGatewayDaemon(portOverride?: string, hostOverride?: 
       }
     }
   }
-  return { host: status.host, port: status.port, token, rpcToken, baseUrl: urlFor(connectionHost(status.host), status.port) }
+  const currentMetadata = await readGatewayMetadata()
+  let persistent = currentMetadata?.persistent ?? false
+  if (requestedPersistent && !persistent && currentMetadata) {
+    await writeGatewayMetadata({ ...currentMetadata, persistent: true })
+    persistent = true
+  } else if (!requestedPersistent && currentMetadata?.persistent === undefined && currentMetadata) {
+    // Metadata written by older releases has no lifetime flag; treat it as transient
+    // so the next orderly TUI exit can clean up the leftover executable process.
+    await writeGatewayMetadata({ ...currentMetadata, persistent: false })
+    persistent = false
+  }
+  return { host: status.host, port: status.port, token, rpcToken, baseUrl: urlFor(connectionHost(status.host), status.port), persistent }
 }
 
 /** Rotate the public client token only while every known gateway endpoint is stopped. */
@@ -244,26 +269,50 @@ export async function stopGatewayDaemon(): Promise<boolean> {
   if (!metadata || !token) return false
   const baseUrl = urlFor(connectionHost(metadata.host), metadata.port)
   const status = await probe(metadata.host, metadata.port, token)
-  if (!status.running) {
-    await removeGatewayMetadata(metadata.pid)
-    return false
+  if (status.running) {
+    let response: Response | undefined
+    try {
+      response = await fetch(`${baseUrl}/gateway/stop`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(2000),
+      })
+    } catch {
+      // A connection reset may mean the stop was accepted just before close.
+      // Wait for both the listener and its process to disappear below.
+    }
+    if (response && !response.ok) throw new Error(`Gateway stop request failed (${response.status}).`)
   }
-  const response = await fetch(`${baseUrl}/gateway/stop`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(2000),
-  })
-  if (!response.ok) throw new Error(`Gateway stop request failed (${response.status}).`)
   const deadline = Date.now() + 5000
   while (Date.now() < deadline) {
     const current = await probe(metadata.host, metadata.port)
-    if (!current.running) {
+    if (!current.running && !processIsRunning(metadata.pid)) {
       await removeGatewayMetadata(metadata.pid)
-      return true
+      return status.running
     }
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  throw new Error('The gateway accepted the stop request but is still responding.')
+  throw new Error(`The gateway accepted the stop request but process ${metadata.pid} is still running.`)
+}
+
+/** Stop the Gateway auto-started for a TUI session, preserving an explicit `gateway start`. */
+export async function stopTransientGatewayDaemon(): Promise<boolean> {
+  const metadata = await readGatewayMetadata()
+  if (isPersistentGateway(metadata)) return false
+  return stopGatewayDaemon()
+}
+
+export function isPersistentGateway(metadata: Pick<GatewayMetadata, 'persistent'> | undefined): boolean {
+  return metadata?.persistent === true
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
 }
 
 export async function showGatewayToken(): Promise<string> {

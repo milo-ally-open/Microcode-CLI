@@ -78,4 +78,4 @@ Pi implementation 留在 adapter 内部。Microcode API 不返回 Pi Provider、
 
 ## 本次核对记录
 
-2026-10-27：package.json 与 bun.lock 固定 pi-ai/pi-agent-core 0.87.1；安装的 pi-ai 声明导出 createModels/createProvider 及 openai/deepseek/openai-codex factories，认证和 API 实现由 Pi provider 管理。当前代码切片实现三项 provider allowlist、GPT-only OpenAI catalog、旧 custom-config diagnostics；更完整的核对和检查结果记录在 `docs/specs/runtime-architecture/tasks.md`。
+2026-10-28：package.json 与 bun.lock 固定 pi-ai/pi-agent-core 0.87.1；安装的 pi-ai 声明导出 createModels/createProvider 及 openai/deepseek/openai-codex factories，认证和 API 实现由 Pi provider 管理。`tests/fixtures/models/provider-capabilities.expected.json` 与 provider fixture tests 现覆盖三项 allowlisted provider/API/auth 组合、代表模型 modality/reasoning/context/output metadata、API-key/OAuth facade 生命周期、usage，以及 image/reasoning 不支持时在 inference 前拒绝。DeepSeek stream fixture 使用锁定 Pi adapter 和本地 SSE 服务；Codex/OpenAI 未发送实时上游请求。具体验收记录见 `docs/specs/runtime-architecture/tasks.md`。

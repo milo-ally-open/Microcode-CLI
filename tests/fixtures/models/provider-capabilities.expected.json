@@ -1,0 +1,31 @@
+{
+  "piAiVersion": "0.87.1",
+  "providers": [
+    {
+      "id": "openai-codex",
+      "authModes": ["oauth"],
+      "api": "openai-codex-responses",
+      "models": [
+        { "id": "gpt-5.5", "input": ["text", "image"], "reasoning": true, "contextWindow": 272000, "maxOutputTokens": 128000 }
+      ]
+    },
+    {
+      "id": "openai",
+      "authModes": ["api_key"],
+      "api": "openai-responses",
+      "models": [
+        { "id": "gpt-5.5", "input": ["text", "image"], "reasoning": true, "contextWindow": 272000, "maxOutputTokens": 128000 },
+        { "id": "gpt-4o", "input": ["text", "image"], "reasoning": false, "contextWindow": 128000, "maxOutputTokens": 16384 }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "authModes": ["api_key"],
+      "api": "openai-completions",
+      "models": [
+        { "id": "deepseek-flash", "input": ["text", "image"], "reasoning": true, "contextWindow": 1000000, "maxOutputTokens": 384000 },
+        { "id": "deepseek-v4-pro", "input": ["text"], "reasoning": true, "contextWindow": 1000000, "maxOutputTokens": 384000 }
+      ]
+    }
+  ]
+}

@@ -272,12 +272,12 @@ function parseFrontmatter<T>(content: string): { frontmatter: T; content: string
   const frontmatter: any = {}
   let body = content
 
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/)
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/)
   if (match) {
     const yamlSection = match[1]
     body = match[2]
 
-    const lines = yamlSection.split('\n')
+    const lines = yamlSection.split(/\r?\n/)
     for (const line of lines) {
       const colonIndex = line.indexOf(':')
       if (colonIndex > 0) {

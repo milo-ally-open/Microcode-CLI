@@ -1,0 +1,22 @@
+{
+  "openai-chat": {
+    "model": "deepseek/deepseek-v4-pro",
+    "messages": [{ "role": "user", "content": "hello" }],
+    "tool_choice": { "type": "function", "function": { "name": "lookup" } }
+  },
+  "openai-responses": {
+    "model": "deepseek/deepseek-v4-pro",
+    "input": "hello",
+    "tools": [{ "type": "web_search", "external_web_access": true }]
+  },
+  "gemini-generate": {
+    "contents": [{ "role": "user", "parts": [{ "text": "hello" }] }],
+    "generationConfig": { "responseMimeType": "application/json" }
+  },
+  "anthropic-messages": {
+    "model": "deepseek/deepseek-v4-pro",
+    "max_tokens": 32,
+    "messages": [{ "role": "user", "content": "hello" }],
+    "thinking": { "type": "enabled", "budget_tokens": 1024 }
+  }
+}

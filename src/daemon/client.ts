@@ -119,6 +119,10 @@ export class GatewayClient {
     return this.connection.host
   }
 
+  get persistent(): boolean {
+    return this.connection.persistent === true
+  }
+
   setConnection(connection: GatewayConnection): void {
     this.connection = connection
   }

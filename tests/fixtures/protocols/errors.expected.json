@@ -1,0 +1,6 @@
+{
+  "openai-chat": "Forced function tool selection is not supported by this gateway.",
+  "openai-responses": "Unsupported Responses tool type \"web_search\"; hosted tools are not executed by this gateway.",
+  "gemini-generate": "Only Gemini responseMimeType=\"text/plain\" is supported.",
+  "anthropic-messages": "Anthropic fixed-budget thinking is not supported by this gateway reasoning contract."
+}

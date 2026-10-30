@@ -1,0 +1,9 @@
+{
+  "normalizedMessages": [
+    { "role": "user", "content": [{ "type": "text", "text": "Find the answer." }] },
+    { "role": "assistant", "content": [{ "type": "tool_call", "id": "call_fixture", "name": "lookup", "arguments": { "query": "answer" } }] },
+    { "role": "tool_result", "toolCallId": "call_fixture", "toolName": "lookup", "content": [{ "type": "text", "text": "42" }] }
+  ],
+  "tool": { "name": "lookup", "description": "Look up a value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } },
+  "serializedCall": { "name": "lookup", "arguments": { "query": "answer" } }
+}

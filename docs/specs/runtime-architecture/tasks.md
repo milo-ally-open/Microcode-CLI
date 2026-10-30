@@ -1,7 +1,7 @@
 # 实施任务：Microcode 运行时架构重构
 
 > 关联规格：[spec.md](spec.md)；设计：[design.md](design.md)<br>
-> 当前阶段：已建立基线与合同；Pi/Provider facade、协议矩阵及 runtime/TUI 跨进程验收仍分阶段进行。
+> 当前状态：T-01 至 T-11 已完成。Provider/API 和四协议验收证据、固定版本客户端 smoke、最终回归及已知兼容边界见本页完成摘要与配套能力矩阵。
 
 ## 任务清单
 
@@ -11,23 +11,32 @@
 
 ### 1. 内核与模型
 
-- [ ] **T-02 建立 Pi Kernel adapter 与 runtime domain contract** — 目标：src/kernel、src/agent、tests/kernel；交付：Pi Agent/model/message/event 映射和 kernel contract；覆盖：REQ-01、REQ-02；AC：AC-01.1、AC-01.2、AC-01.3、AC-02.1、AC-02.2、AC-02.3；依赖：T-01；状态：进行中：Pi Agent loop 构造与 prompt lifecycle 已收进 `src/kernel/pi/agent.ts`；`src/runtime/contracts.ts` 定义服务 DTO，Pi mapper 负责 Pi 消息/模型转换；Pi lifecycle event union 已在 adapter 中映射为 `KernelAgentEvent`，assistant stream event 的 message/tool call 字段也由该边界投影。Agent event/snapshot 到 wire DTO 的投影现位于 `src/agent/runtimeProjection.ts`，runtime layer 不再反向导入 Agent 或 Pi mapper，消息 DTO 由 composition 显式注入 mapper；kernel mapper 不反向导入 Agent、MCP 或 instructions 层。permission request 使用独立 ID，`PermissionManager` 现在只接收中性的 `KernelToolCallRequest`，Pi hook 映射留在 kernel adapter；工具调用后的动态工具集更新也由 kernel hook contract 表达，Pi `Agent.state.tools` 与当前执行 context 的同步写入收在 `src/kernel/pi/agent.ts`；token estimator/tracker 改用中性消息与 usage 结构；系统提示词从前端 DTO 隐去；`RuntimeThinkingLevel` 和 `RuntimeImageInput` 已作为 TUI/runtime/Agent 公共 DTO，daemon env/command 使用同一 thinking 校验器，图片到 Pi `ImageContent` 的转换留在 `src/kernel/pi/mapper.ts`；`CompactionManager` 现经 `CompactionMessageAdapter` 接收消息识别、估算、摘要构造和工具结果改写行为；Pi message 处理及 `generateSummary`、模型集合和后台上下文位于 `src/kernel/pi/compaction.ts`，compactable tool IDs 由 Agent runtime composition 注入。Agent model snapshot、MicrocodeAgent snapshot 与 model_changed runtime event 现使用 `RuntimeModelDescriptor`；AgentModelManager 已泛型化且不导入 Pi/provider resolver，model resolver 与 credential lookup 由 runtime composition 注入，Pi catalog 与 credential resolver 移至 `src/models/agentResolver.ts`；`AgentSessionPersistence`/`AgentCompactionRecord` 已泛型化，不再固定 Pi 消息类型。`泛型 MicrocodeAgent` 当前通过 `AgentRuntimeAdapter` 消费通用模型、消息和 kernel ports；`src/agent/MicrocodeAgent.ts` 与 `types.ts` 不再导入 Pi 或 Pi-backed resolver。`src/agent/piRuntimeAdapter.ts` 由 composition 组合 Pi Agent、Pi inference、compaction 和 transcript adapter；SessionManager 通过 runtime ports 注入 Pi JSONL store 与 transcript compatibility。另一个非 Pi adapter 的契约用例已加入；RuntimeAgentSession/daemon 的活动实现仍明确实例化 Pi，完整替代内核与跨进程验收待做。
-- [ ] **T-03 建立 provider registry 并应用初始 allowlist** — 目标：src/models/providers、src/models/registry、src/models/authChoices、tests/models；交付：openai-codex/openai/deepseek 静态 provider registrations、API/auth 声明校验、旧 config 诊断和 secret-safe auth choices；覆盖：REQ-03、REQ-08；AC：AC-03.1、AC-03.2、AC-03.3、AC-03.4、AC-08.2、AC-08.3、AC-08.4；依赖：T-02；状态：进行中：三项静态 adapter 已拆到独立 provider 文件，带稳定 ID/显示名/版本/auth/API 声明及 Pi factory 校验；`getModelCatalog()` 返回不含 endpoint/credential/Pi instance 的 Pi-free 描述；`ModelProviderRuntime` 的模型描述、推理输入、结果、流事件和认证合同已改为 `src/models/` 中性 DTO，Pi collection/auth/stream/complete 转换集中于 `src/models/piRuntime.ts` 与 `src/kernel/pi/modelAdapter.ts`。[provider capability matrix](provider-capability-matrix.md) 记录了锁定 catalog 的 provider/auth/API 和能力来源。旧 custom model 诊断现列出受限的 `custom/model-id` 标识且不回显 URL、key 环境变量或 header 值；auth/stream end-to-end smoke 与 capability fixture 仍待完成。
-- [ ] **T-04 将四个客户端协议与 provider facade 解耦** — 目标：src/daemon/protocol、src/daemon/server、tests/daemon；交付：Chat Completions、Responses、Gemini Generate Content、Anthropic Messages parser/serializer 和 capability/error matrix；覆盖：REQ-04；AC：AC-04.1、AC-04.2、AC-04.3、AC-04.4、AC-04.5；依赖：T-03；状态：进行中：四种协议的 request parser、response serializer、SSE adapter 和内部 RPC 均使用中性模型 DTO；Pi 转换只留在 `src/kernel/pi/modelAdapter.ts` 及 Pi CLI 的 `src/daemon/client.ts` adapter。[协议能力矩阵](protocol-capability-matrix.md) 已按当前 parser/server/SSE 实现记录路由、支持项、拒绝项、限制与错误映射；顶层字段和被消费的嵌套消息、内容、工具、reasoning 字段均拒绝未知成员，JSON Schema 与 client_metadata 保留为开放 payload；tool-result 内容限文本/图片结构。四协议固定 fixture 覆盖与注明版本的 client smoke 仍待完成。
+- [x] **T-02 建立 Pi Kernel adapter 与 runtime domain contract** — 覆盖 REQ-01、REQ-02；AC：AC-01.1、AC-01.2、AC-01.3、AC-02.1、AC-02.2、AC-02.3。Pi Agent/model/message/event 映射、Pi-free Agent/runtime DTO、权限与 session ports、版本化服务 DTO 已建立。`MicrocodeAgent` 通过 `AgentRuntimeAdapter` 组合当前 Pi kernel；非 Pi adapter contract、Pi composition boundary、跨路径 transcript 与 runtime host 均有测试。完成表示内核边界和当前 Pi adapter 已验收，不表示已经替换 Pi 或提供第二个生产内核。
+- [x] **T-03 建立 provider registry 并应用初始 allowlist** — 覆盖 REQ-03、REQ-08；AC：AC-03.1、AC-03.2、AC-03.3、AC-03.4、AC-08.2、AC-08.3、AC-08.4。`provider-capabilities.expected.json` 固定 pi-ai 0.87.1 下三项 allowlisted provider/API 的认证模式及代表模型 modality、reasoning、context/output metadata；测试覆盖 OpenAI/DeepSeek API-key、离线 Codex OAuth 生命周期、DeepSeek usage，以及不支持图像或 reasoning 时在 inference 前拒绝。Codex/OpenAI 不发起真实上游请求。
+- [x] **T-04 将四个客户端协议与 provider facade 解耦** — 覆盖 REQ-04；AC：AC-04.1、AC-04.2、AC-04.3、AC-04.4、AC-04.5。固定 fixtures 覆盖四协议工具调用/结果归一与输出、SSE 事件顺序、请求拒绝、流错误和客户端断开取消；固定 OpenAI Node SDK 6.40.0 对本地 fake runtime Gateway 成功完成 Chat Completions 请求。可选 Codex CLI smoke 仍单独记录为 hosted `custom` tool 安全拒绝，不代表该工具已受支持。
 
 ### 2. 工具和能力
 
-- [ ] **T-05 建立可版本化的工具 registry 和 Agent runtime tool mutation** — 目标：src/tools、src/agent/AgentToolManager、tests/tools、tests/agent；交付：tool adapter contract、运行时 enable/disable、安全 snapshot 和权限复核；覆盖：REQ-05；AC：AC-05.1、AC-05.2、AC-05.3、AC-05.4、AC-05.5、AC-05.6；依赖：T-02；状态：进行中：稳定 tool ID（name）、正整数 contract version、mutable metadata、重复 ID 检查、最小默认集合、Agent `tool_control` 与递增 snapshot 已实现；`MicrocodeAgent.setToolEnabled` 等待 turn idle 且必须匹配调用方 snapshot 版本；PermissionManager 不受集合切换修改，deny 仍有效。`src/tools/contracts.ts` 定义 Pi-free ToolAdapter/结果/任务持久化窄合同，registry、内置工具工厂、MCP 与 worktree 工具均返回该合同；AgentToolManager 的所有集合均保存中性 adapter，`MicrocodeAgent` 和 KernelAgentPort 只传递 ToolAdapter，Pi 转换统一在 `src/kernel/pi/agent.ts` 初始化/更新边界调用 `src/kernel/pi/toolAdapter.ts` 执行。file edit/write adapter 可选生成只读审批预览，由 Agent permission event 传给客户端；TUI 不再导入工具实现，工具/UI 都使用 `src/utils/textUtils.ts` 的纯文本行数 helper。工具执行 registry 与 TUI presentation registry 已分离，View 文件移入 `src/tui/toolViews/`；runtime service 的 `tool.set` 必须提交 `expected_version`，Agent idle wait 后复核快照版本，旧版本返回 409；同进程 add/remove/MCP tool-set mutation 在 Agent busy 时于 registry 变更前拒绝，MCP owner 在活动 turn 期间延后 refresh。MCP/plugin capability scope event 与客户端并发验收仍待后续完成。
-- [ ] **T-06 将 Skill/MCP/Plugin 作为 runtime capability adapters 接入新 runtime owner** — 目标：src/skill、src/mcp、src/plugins、src/daemon/runtime-service、tests；交付：既有发现/生命周期规则经新服务边界驱动，保持 source scopes 和权限；覆盖：REQ-06；AC：AC-06.1、AC-06.2、AC-06.3；依赖：T-05；状态：进行中：runtime child 加载项目指令、Plugin Skills/诊断、standalone MCP 和 Plugin MCP；MCP 连接不阻塞握手，状态进入安全快照。`skill.set`、`plugin.refresh`、`plugin.set`、`plugin.set_many`、`mcp.refresh` 由 runtime 执行；`MicrocodeAgent` 在 prompt 边界读取技能正文并调用 composition 注入的 Plugin context builder，服务分发层不再拼装上下文。TUI 管理命令已切到 runtime facade；能力规范回归及 secret-redaction 跨进程验收待做。
+- [x] **T-05 建立可版本化的工具 registry 和 Agent runtime tool mutation** — 覆盖 REQ-05；AC：AC-05.1、AC-05.2、AC-05.3、AC-05.4、AC-05.5、AC-05.6。Pi-free ToolAdapter、原子版本化 snapshot、权限复核、stale `expected_version` 冲突、客户端刷新后单次重试、capability event 到 TUI 的更新均有测试；权限规则不随工具启停改变。
+- [x] **T-06 将 Skill/MCP/Plugin 作为 runtime capability adapters 接入新 runtime owner** — 覆盖 REQ-06；AC：AC-06.1、AC-06.2、AC-06.3。runtime 管理 Skill、Plugin、standalone/Plugin MCP；测试覆盖 project scope、skill load/unload、plugin enable/refresh、legacy MCP 来源、deny 保持、secret 脱敏及 capability snapshot/event。
 
 ### 3. 服务端、客户端与迁移
 
-- [ ] **T-07 实现独立认证的 Bun runtime service transport** — 目标：src/daemon/runtime-service、src/daemon/server、tests/daemon；交付：loopback listener、handshake、命令幂等、序号事件、snapshot/reconnect、prompt round trip 和安全关闭；覆盖：REQ-02、REQ-07；AC：AC-01.2、AC-02.1、AC-02.2、AC-07.2、AC-07.3、AC-07.4、AC-07.6；依赖：T-02、T-05；状态：进行中：protocol v1 listener、独立 Bearer token、命令 schema/请求体限制、request_id 去重、snapshot sequence、SSE replay/reconnect、真实单会话 Agent/session host 与 permission/question 往返已实现；compaction command 只返回摘要和计数，不再序列化完整 Pi transcript。生命周期 helper 管理 per-workspace key/token/metadata、启动锁、starting/ready 状态和 shutdown。session resume/open/clear、任务/导出/权限/模型/插件命令已接入；Windows subprocess stop/start、长时间重连及多客户端验收待完成。
-- [ ] **T-08 将 Chalk TUI 与 CLI 改为纯 runtime client** — 目标：src/main.tsx、src/tui、src/daemon/client、tests/tui；交付：TUI 移除 Agent/capability/session ownership，支持 event projection 与断线重连；覆盖：REQ-07；AC：AC-07.1、AC-07.5；依赖：T-06、T-07；状态：进行中：常规入口通过 `ensureRuntimeService`、`RuntimeClientSession` 和 runtime facade 连接 Agent、session 与 plugin/MCP capability；`App` 的 session/plugin/MCP/instruction/Git 操作改为 TUI ports，MCP/指令/权限/skill/model catalog/auth/title/Git 命令转到 runtime，连接中断与恢复显示可见状态。Agent、model、MCP、instructions、Git 和 plugin 的 TUI contracts 分别由 `TuiAgentPort`/`TuiModelPort`/`TuiMcpPort`/`TuiInstructionsPort`/`TuiGitPort`/`TuiPluginPort` 表达；Plugin UI DTO 不携带 plugin root、skill 对象或 MCP 原始配置，Runtime facade 与本地 adapter 分别映射其实现，`App` 不直接依赖具体 manager/Pi 类型。工具审批预览随 permission event 从 runtime 发送，TUI presentation registry 不导入 file tool 实现；TUI permission mode 只依赖 `permissions/types.ts` 的中性 contract，不加载 PermissionManager/tool registry。文本 `@file`、Skill 与 Plugin mention 正文均在 Agent runtime 处理，App 对默认与 `--no-daemon` 路径都发送原始 prompt；前端文件/skill/plugin 列表仍用于补全，图片附件仍在客户端读取。`--no-daemon` 由 local adapters 保持兼容。`App` 现要求显式传入 `TuiSessionPort`，不再自行创建 `SessionManager`；`/init` 的目录扫描、模型提案、MICRO.md 写入和指令重载在 runtime/local instructions adapter 中执行。完整 auth prompt 子进程 smoke、Gateway bind-control 边界、历史 session 和完整 view contract 验收仍待完成。
-- [ ] **T-09 保持 session/config 与 no-daemon 回退并做跨层验收** — 目标：src/session、src/daemon/startup、tests/session、tests/daemon；交付：旧 session fixture 可读、runtime service 唯一写入、显式 in-process 模式、migration diagnostics；覆盖：REQ-08、REQ-07；AC：AC-08.1、AC-08.2、AC-08.3、AC-07.6；依赖：T-03、T-04、T-08；状态：进行中：默认 TUI 只通过 runtime 命令读写 session，`--no-daemon` 保留进程内 Pi path，现有 JSONL schema 未改，SessionManager 已通过存储/transcript ports 注入 Pi 实现；当前 `bun test ./tests/session` 为 8 pass、0 fail；最近 `bun test ./tests` 为 249 pass、1 integration skip、0 fail、1332 expectations，`bunx tsc --noEmit` 通过。仍需验证历史 JSONL fixture 与默认/本地两种入口的跨层行为。
-- [ ] **T-10 同步权威文档并完成实施验收** — 目标：AGENTS.md、docs/specs/model_intergration_spec.md、docs/specs/runtime-architecture 与 README.md；交付：规则不冲突、model/tool onboarding guide 可独立完成、已执行检查如实记录；覆盖：REQ-03、REQ-04、REQ-08；AC：AC-03.1、AC-03.2、AC-03.3、AC-03.4、AC-04.1、AC-04.2、AC-04.3、AC-04.4、AC-04.5、AC-08.4；依赖：T-03 至 T-09；状态：进行中：默认 runtime/no-daemon 语义和六层目标已同步 README、AGENTS 与 architecture docs；provider auth/stream smoke、四协议 fixture 与版本化 client smoke、跨进程 CLI 验收仍待完成。
+- [x] **T-07 实现独立认证的 Bun runtime service transport** — 覆盖 REQ-02、REQ-07；AC：AC-01.2、AC-02.1、AC-02.2、AC-07.2、AC-07.3、AC-07.4、AC-07.6。loopback/独立 token、版本握手、幂等命令、SSE replay、prompt 往返、安全关闭、Windows child 重启、跨客户端 stale-version 竞争均有进程级验收；客户端多秒断线后恢复快照和事件流有测试。
+- [x] **T-08 将 Chalk TUI 与 CLI 改为纯 runtime client** — 覆盖 REQ-07；AC：AC-07.1、AC-07.5。默认入口通过 runtime facades，`--no-daemon` 保留 local adapters；事件/snapshot projection、auth prompt 与输入遮罩、Gateway busy 边界和完整 Agent view contract 有测试。
+- [x] **T-09 保持 session/config 与 no-daemon 回退并做跨层验收** — 覆盖 REQ-08、REQ-07；AC：AC-08.1、AC-08.2、AC-08.3、AC-07.6。历史 v3 JSONL fixture 可读且原文件不改写，默认 runtime service 与 in-process `--no-daemon` 路径可恢复相同 transcript；旧 provider 配置诊断保持 secret-safe。
+- [x] **T-10 同步权威文档并完成实施验收** — 覆盖 REQ-03、REQ-04、REQ-08；AC：AC-03.1、AC-03.2、AC-03.3、AC-03.4、AC-04.1、AC-04.2、AC-04.3、AC-04.4、AC-04.5、AC-08.4。README、模型/工具指南、规格与能力矩阵已同步；全量 tests、TypeScript 检查、runtime-architecture validator、build 与 `git diff --check` 均通过。Codex CLI integration test 按默认配置跳过，OpenAI Node SDK 6.40.0 的本地成功 smoke 已运行。
+- [x] **T-11 有序退出时关闭 Runtime 与临时 Gateway 子进程** — 覆盖 REQ-07；AC：AC-07.7。`/exit`、退出型 Ctrl+C 与 SIGTERM 在退出前取消活动 turn、停止 Runtime、停止 TUI 启动的临时 Gateway，并等待监听关闭及子进程退出；显式 `gateway start` 仍为持久模式。真实子进程验收覆盖 runtime/gateway stop helper。
+
+
+## 本轮 Todo 闭环（2026-10-28）
+
+- [x] Provider/API 能力与认证 fixtures：三个 allowlisted provider 的 API/auth 元数据、代表模型能力、API-key/OAuth 生命周期、usage 和明确拒绝路径均有固定覆盖。
+- [x] 四协议 Gateway fixtures 与客户端 smoke：工具往返、SSE 顺序、错误、断连取消及固定版本 OpenAI Node SDK 6.40.0 成功请求均已覆盖。
+- [x] 文档同步与全量验收：README、规格及矩阵已同步；最终 tests、类型检查、validator、build、diff 检查结果记录如下。
 
 ## 验收记录
+下表保留早期验收切片的结果；其中“待做/部分”是记录当时状态，当前状态以本页 Todo 清单及 2026-10-28 验收为准。
 
 | AC | 检查方法 | 结果/证据 | 状态 |
 |---|---|---|---|
@@ -116,17 +125,34 @@
 | 2026-10-27 | 旧 custom-model 配置诊断包含 disabled 的 `custom/model-id`，并限制展示数量，不输出 base URL、auth 环境变量名或 header 值 | `bun test ./tests/models/config.test.ts` 覆盖安全字段；最近完整测试与类型检查通过 | `src/models/custom.ts`、`tests/models/config.test.ts`、`docs/specs/runtime-architecture/tasks.md` |
 | 2026-10-27 | TUI permission mode UI 与 runtime facade 改为直接依赖纯 permission contract，避免 `App` 通过 barrel export 加载 PermissionManager 和工具 registry | 新增静态 import-boundary test；最近完整测试与类型检查通过 | `src/tui/app.ts`、`src/tui/agentPort.ts`、`src/tui/runtimeAgentFacade.ts`、`tests/tui/import-boundaries.test.ts` |
 
-## 已完成的阶段验收（2026-10-27）
+## 已完成的阶段验收（截至 2026-10-28）
 
 - [x] **历史 session 兼容** — `tests/fixtures/sessions/legacy-v3-session.jsonl` 通过锁定 Pi JSONL repo 与 `SessionManager` 打开；验证 user/assistant 消息、完整 archive 与源文件不被重写。`tests/session/session.test.ts`。
-- [x] **Provider auth/stream 与协议/client fixtures** — `tests/models/providerRuntime.test.ts` 验证 API-key secret prompt/status/logout 不泄密，以及锁定 Pi DeepSeek adapter 对本地 OpenAI Chat Completions SSE 服务发起认证流式请求；`tests/daemon/protocol-fixtures.test.ts` 用固定 JSON fixture 覆盖 Chat Completions、Responses、Gemini Generate Content、Anthropic Messages。固定 Codex CLI 版本见 `tests/fixtures/clients/codex-cli.version.txt`；启用 `MICROCODE_CODEX_INTEGRATION=1` 的实际 CLI smoke 验证请求抵达 Gateway 且凭据不回显。当前 CLI 会发送 Responses hosted `custom` tool，Gateway 按设计在 provider inference 前安全拒绝；不将其描述为已支持 hosted-tool 执行。
+- [x] **Provider auth/stream 与协议/client fixtures** — `tests/models/providerCapabilityFixtures.test.ts` 固定校验三个 provider/API 组合、代表模型能力、API-key/OAuth 流程、图像/reasoning 拒绝；`tests/models/providerRuntime.test.ts` 运行锁定 Pi DeepSeek adapter 对本地 SSE 服务发起认证请求并校验 usage。`tests/daemon/protocol-fixtures.test.ts` 覆盖四协议工具 round-trip、tool serialization、固定 unsupported request 与 SSE 顺序；`protocol-error-stream.test.ts` 和 `protocol-cancellation.test.ts` 覆盖每个 dialect 的安全错误和断连取消。`tests/daemon/openai-sdk-smoke.test.ts` 用固定 OpenAI Node SDK 6.40.0 成功调用本地 Gateway/fake runtime。固定 Codex CLI 版本见 `tests/fixtures/clients/codex-cli.version.txt`；CLI smoke 会被 Gateway 按设计安全拒绝 hosted `custom` tool，不代表支持 hosted-tool 执行。
 - [x] **Bun runtime Windows 子进程** — `tests/daemon/runtime-service-process.test.ts` 启动真实 child、握手认证、发出并取消 secret auth prompt、重连/replay、关闭后重启并再次认证，确认 shutdown 清除 metadata。
 - [x] **跨进程变更竞争与 capability secret 脱敏** — 同一子进程测试并发提交两个相同 `expected_version` 的工具变更，验证一个提交、另一个收到 `stale_tool_snapshot`；MCP Authorization secret 不出现在 runtime snapshot、prompt event 或 child output。
 - [x] **Pi composition 边界** — 接受 `RuntimeAgentSession` 在 daemon composition root 内实例化 Pi adapter；`tests/daemon/runtime-composition-boundary.test.ts` 证明 Agent core 与 runtime contracts 不导入 Pi，`tests/daemon/runtime-agent-session.test.ts` 证明 wire model DTO 保持中性。此验收确认当前 Pi composition 的边界，并不声称已经替换 Pi 内核。
 
+## 2026-10-28 Todo 闭环记录
+
+- [x] Runtime client conflict/recovery：stale `tool.set` 自动刷新 snapshot 并至多重试一次；`capabilities_changed` 先刷新 snapshot 再通知订阅者；客户端在多秒服务中断后恢复事件流。`bun test ./tests/daemon/runtime-client.test.ts`：3 pass、0 fail、9 expectations。
+- [x] TUI event/view contract：全套 Runtime Agent event vocabulary、snapshot/token/skill projection、capability refresh、model auth prompt/输入遮罩与 Gateway busy 边界均有合同测试。`bun test ./tests/tui/runtime-view-contract.test.ts`：7 pass、0 fail、34 expectations。
+- [x] Session/no-daemon compatibility：同一 JSONL transcript 可由默认 Runtime Service 和进程内 Agent runtime 恢复。`bun test ./tests/daemon/runtime-session-compat.test.ts`：1 pass、0 fail、9 expectations。历史 v3 fixture 兼容另由 `tests/session/session.test.ts` 验证。
+- [x] Skill/Plugin/MCP ownership：覆盖 Plugin Skill scope 与 load/unload、Plugin enable/refresh、MCP legacy source scope、deny 保持、配置 secret 脱敏和 capability event。`bun test ./tests/daemon/runtime-capabilities.test.ts`：2 pass、0 fail、24 expectations。
+- [x] MCP refresh 为 TUI 返回白名单化来源摘要（scope、source path、package name 与脱敏连接摘要）；不向 client DTO 暴露原始 headers/env/配置。
+
 ## 完成摘要
 
-- 完成的规格任务：T-01。T-02 至 T-10 的更广架构交付仍按任务状态分阶段推进；本轮五项阶段验收已完成，详见上表。
-- 最近完整回归：`bun test ./tests` 为 255 pass、1 个默认跳过的 Codex CLI integration test、0 fail、1388 expectations；另以 `MICROCODE_CODEX_INTEGRATION=1 bun test ./tests/daemon/codex.integration.test.ts` 验证固定版本 Codex CLI smoke（2 pass、0 fail、8 expectations）。`bunx tsc --noEmit`、runtime-architecture spec validator 与 `git diff --check` 通过。Build 未运行。后续未完成项仍包括更广的模型/provider 和 capability 矩阵验收、完整 TUI 默认 runtime-owner 迁移及其余 AC；Codex hosted `custom` tool 目前被 Gateway 明确拒绝，不属于已支持能力。
-- 已同步的权威来源：新增重构 architecture spec group；AGENTS.md、旧模型规范及 README provider 文档已同步当前 allowlist 状态。
-- 完成日期：未完成。
+- 当前状态：T-01 至 T-10 已完成；Codex CLI hosted `custom` tool 仍不受支持，且本轮 Codex CLI integration smoke 按默认条件跳过。
+- 最终回归（2026-10-28）：`bun test ./tests` 为 278 pass、1 个默认跳过的 Codex CLI integration test、0 fail、1557 expectations；`bunx tsc --noEmit` 通过；`bun run build --no-install` 成功（2267 modules、97.2 MB，安装步骤按参数跳过）；runtime-architecture spec validator 通过（8 REQ、34 AC、10 T），`git diff --check` 通过。固定 OpenAI Node SDK 6.40.0 本地成功 smoke 已包含在全量测试中。Codex CLI integration smoke 未运行，安全拒绝边界仍由已有测试和规格记录。当前环境的 Bun 为 1.4.3；仓库声明 `bun@1.3.14`，该精确版本未安装。
+- 已同步的权威来源：`tasks.md`、`spec.md`、protocol capability matrix、provider guide 与 README 中的能力边界一致；外部 runtime/API security policy 仍以 AGENTS.md 和对应权威规格为准。
+- 完成日期：2026-10-28。
+
+## 2026-10-30 退出生命周期修复
+
+- 当前状态：T-01 至 T-11 已完成。
+- `bun test ./tests/daemon/interactive-lifecycle.test.ts ./tests/daemon/runtime-service-process.test.ts ./tests/daemon/lifecycle.test.ts`：6 pass、0 fail、60 expectations；真实 runtime 与 Gateway 子进程在 stop helper 返回前已退出。
+- `bun test ./tests`：280 pass、1 个默认跳过的 Codex CLI integration test、0 fail、1564 expectations；`bunx tsc --noEmit` 通过。
+- Runtime architecture validator：8 REQ、35 AC、11 tasks，通过；`git diff --check` 通过（仅有仓库既有 CRLF 提示）。
+- `bun run build` 两次均成功编译并实际替换安装版 `microcode.exe`（2268 modules、97.3 MB）。在隔离临时用户目录用安装版分别执行 `/exit` 和 Ctrl+C；两次均退出码 0，Runtime/Gateway metadata 清空，且无残留 `microcode.exe` 进程。
+- 验收环境 Bun 为 1.4.3，仓库声明 `bun@1.3.14`；本轮未切换 Bun 版本。

@@ -143,20 +143,32 @@ export async function ensureRuntimeService(
 }
 
 export async function stopRuntimeService(connection: RuntimeConnection): Promise<boolean> {
+  let serviceWasRunning = true
   try {
     await connection.client.shutdown(AbortSignal.timeout(2000))
   } catch (error) {
-    if (!(error instanceof Error) || !('status' in error && (error as { status?: number }).status === 404)) throw error
+    if (error instanceof Error && 'status' in error && (error as { status?: number }).status === 404) {
+      // It is already shutting down; keep waiting for the process itself to exit.
+    } else if (error instanceof Error && 'status' in error) {
+      throw error
+    } else {
+      // A reset can race with an already accepted shutdown. The PID check below
+      // decides whether the detached process has actually released the executable.
+      serviceWasRunning = processIsRunning(connection.metadata.pid)
+    }
   }
   const deadline = Date.now() + 5000
   while (Date.now() < deadline) {
+    let serviceResponding = false
     try {
       await fetch(`${connection.baseUrl}/runtime/v1/health`, { signal: AbortSignal.timeout(200) })
-    } catch {
+      serviceResponding = true
+    } catch { /* The listener is closed. */ }
+    if (!serviceResponding && !processIsRunning(connection.metadata.pid)) {
       await removeRuntimeMetadata(connection.key, connection.metadata.pid)
-      return true
+      return serviceWasRunning
     }
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  throw new Error('The runtime service accepted the stop request but is still responding.')
+  throw new Error(`The runtime service accepted the stop request but process ${connection.metadata.pid} is still running.`)
 }

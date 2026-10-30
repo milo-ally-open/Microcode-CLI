@@ -1,0 +1,6 @@
+{
+  "openai-chat": ["assistant_role", "server_error", "done_marker"],
+  "openai-responses": ["response.created", "response.in_progress", "response.failed"],
+  "gemini-generate": ["error"],
+  "anthropic-messages": ["message_start", "error"]
+}
